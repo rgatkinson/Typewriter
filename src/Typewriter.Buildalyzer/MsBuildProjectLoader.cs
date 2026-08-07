@@ -142,6 +142,7 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
             state.ProjectDirectory = Path.GetDirectoryName(path: result.ProjectFilePath) ?? Environment.CurrentDirectory;
             state.TargetFramework = result.TargetFramework;
             state.NullableEnabled = IsEnabled(value: result.GetProperty(name: "Nullable"));
+            state.AllowUnsafeBlocks = IsEnabled(value: result.GetProperty(name: "AllowUnsafeBlocks"));
             state.ImplicitUsingsEnabled = IsEnabled(value: result.GetProperty(name: "ImplicitUsings"));
             state.GlobalUsings.UnionWith(other: GetImplicitUsings(enabled: state.ImplicitUsingsEnabled));
             state.PreprocessorSymbols.UnionWith(other: result.PreprocessorSymbols);
@@ -493,6 +494,8 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
 
         public bool NullableEnabled { get; set; }
 
+        public bool AllowUnsafeBlocks { get; set; }
+
         public bool ImplicitUsingsEnabled { get; set; }
 
         public HashSet<string> VisitedProjects { get; } = new(comparer: PathComparer);
@@ -520,6 +523,7 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
                 ProjectPath: ProjectPath,
                 ProjectDirectory: ProjectDirectory,
                 TargetFramework: TargetFramework,
+                AllowUnsafeBlocks: AllowUnsafeBlocks,
                 NullableEnabled: NullableEnabled,
                 ImplicitUsingsEnabled: ImplicitUsingsEnabled,
                 SourceFiles: SourceFiles.Order(comparer: StringComparer.OrdinalIgnoreCase).ToArray(),

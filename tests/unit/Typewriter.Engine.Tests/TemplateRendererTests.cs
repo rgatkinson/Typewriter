@@ -1053,6 +1053,34 @@ public sealed class TemplateRendererTests
     }
 
     [Fact]
+    public void ParseIgnoresBracesInsideLiteralsAndComments()
+    {
+        var metadata = SampleUserMetadata();
+        const string template = """"
+            ${
+                string Braced(Class c)
+                {
+                    // a closing brace } in a comment
+                    /* and another } here */
+                    var open = "{";
+                    var close = '}';
+                    var verbatim = @"} "" }";
+                    return c.Name + open + close + verbatim.Length;
+                }
+            }
+            $Classes[$Braced]
+            """";
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        diagnostics.Should().BeEmpty();
+        output.Should().Contain("User{}");
+    }
+
+    [Fact]
     public async Task RenderSupportsLoadDirectiveForSharedHelpers()
     {
         var metadata = SampleUserMetadata();

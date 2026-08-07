@@ -16,4 +16,5 @@ public sealed record ProjectLoadResult(
     IReadOnlyList<string> AnalyzerReferences,
     IReadOnlyList<string> AdditionalFiles,
     IReadOnlyList<string> AnalyzerConfigFiles,
-    IReadOnlyList<GenerationDiagnostic> Diagnostics);
+    IReadOnlyList<GenerationDiagnostic> Diagnostics,
+    bool AllowUnsafeBlocks = false);

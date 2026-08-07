@@ -334,13 +334,47 @@ public sealed record TemplateDocument(
         char close)
     {
         var depth = 0;
-        for (var index = openIndex; index < content.Length; index++)
+        var index = openIndex;
+        while (index < content.Length)
         {
-            if (content[index: index] == open)
+            var current = content[index: index];
+
+            // Braces, quotes and comment markers inside C# literals or comments must not
+            // influence the nesting depth, otherwise templates containing values such as
+            // tmp.IndexOf("{") are reported as unclosed code blocks.
+            if (current == '@' && index + 1 < content.Length && content[index: index + 1] == '"')
+            {
+                index = SkipVerbatimString(content: content, quoteIndex: index + 1) + 1;
+                continue;
+            }
+
+            if (current is '"' or '\'')
+            {
+                index = SkipLiteral(content: content, startIndex: index) + 1;
+                continue;
+            }
+
+            if (current == '/' && index + 1 < content.Length)
+            {
+                var next = content[index: index + 1];
+                if (next == '/')
+                {
+                    index = SkipLineComment(content: content, startIndex: index) + 1;
+                    continue;
+                }
+
+                if (next == '*')
+                {
+                    index = SkipBlockComment(content: content, startIndex: index) + 1;
+                    continue;
+                }
+            }
+
+            if (current == open)
             {
                 depth++;
             }
-            else if (content[index: index] == close)
+            else if (current == close)
             {
                 depth--;
                 if (depth == 0)
@@ -348,9 +382,78 @@ public sealed record TemplateDocument(
                     return index;
                 }
             }
+
+            index++;
         }
 
         return -1;
+    }
+
+    private static int SkipLiteral(
+        string content,
+        int startIndex)
+    {
+        var quote = content[index: startIndex];
+        var index = startIndex + 1;
+        while (index < content.Length)
+        {
+            var current = content[index: index];
+            if (current == '\\')
+            {
+                index += 2;
+                continue;
+            }
+
+            if (current == quote)
+            {
+                return index;
+            }
+
+            index++;
+        }
+
+        return content.Length;
+    }
+
+    private static int SkipVerbatimString(
+        string content,
+        int quoteIndex)
+    {
+        var index = quoteIndex + 1;
+        while (index < content.Length)
+        {
+            if (content[index: index] != '"')
+            {
+                index++;
+                continue;
+            }
+
+            if (index + 1 < content.Length && content[index: index + 1] == '"')
+            {
+                index += 2;
+                continue;
+            }
+
+            return index;
+        }
+
+        return content.Length;
+    }
+
+    private static int SkipLineComment(
+        string content,
+        int startIndex)
+    {
+        var end = content.IndexOf(value: '\n', startIndex: startIndex);
+        return end < 0 ? content.Length : end;
+    }
+
+    private static int SkipBlockComment(
+        string content,
+        int startIndex)
+    {
+        var end = content.IndexOf(value: "*/", startIndex: startIndex + 2, comparisonType: StringComparison.Ordinal);
+        return end < 0 ? content.Length : end + 1;
     }
 
     private static string? FindSingleFileMode(string block)

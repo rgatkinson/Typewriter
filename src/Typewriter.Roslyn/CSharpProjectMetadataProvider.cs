@@ -295,6 +295,7 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
             references: CreateReferences(referencePaths: loadedProject.ReferencePaths).Concat(second: projectReferences),
             options: new CSharpCompilationOptions(
                 outputKind: OutputKind.DynamicallyLinkedLibrary,
+                allowUnsafe: loadedProject.AllowUnsafeBlocks,
                 nullableContextOptions: NullableContextOptions.Enable));
 
         compilation = RunSourceGenerators(
