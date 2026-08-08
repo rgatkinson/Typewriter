@@ -84,7 +84,8 @@ public sealed class TemplateRenderer
             OutputDirectory: settings?.OutputDirectory,
             Utf8Bom: settings?.Utf8BomGeneration,
             GenerateFileHeader: settings?.FileHeaderGeneration,
-            InsertFinalNewline: settings?.FinalNewlineGeneration);
+            InsertFinalNewline: settings?.FinalNewlineGeneration,
+            FinalNewlineCount: settings?.FinalNewlineCount ?? 1);
     }
 
 #pragma warning disable SA1204
@@ -2825,6 +2826,15 @@ public sealed class TemplateRenderer
             "BaseClass" => type.BaseTypes.FirstOrDefault(),
             "BaseRecord" => type.BaseTypes.FirstOrDefault(),
             "BaseTypes" => type.BaseTypes,
+
+            // `Interfaces` is the interface-valued subset of BaseTypes. It was missing here while
+            // every sibling member (BaseTypes, the Nested* family) was present, so `$Type.Interfaces`
+            // fell through to Unresolved and rendered as literal template text. Kept alongside
+            // BaseTypes so the relationship between the two stays visible.
+            "Interfaces" => type.BaseTypes.Where(
+                predicate: baseType => state is not null
+                    && state.TryResolveType(fullName: baseType.FullName, type: out var declaration)
+                    && declaration.Kind == TypeMetadataKind.Interface),
             "ContainingClass" => ResolveContainingType(type: type, kind: TypeMetadataKind.Class, state: state),
             "ContainingRecord" => ResolveContainingType(type: type, kind: TypeMetadataKind.Record, state: state),
             "ContainingStruct" => ResolveContainingType(type: type, kind: TypeMetadataKind.Struct, state: state),
@@ -3158,8 +3168,59 @@ public sealed class TemplateRenderer
             // reporting true when they literally are Task/ValueTask types.
             "IsTask" => type.IsTask || IsTaskLike(fullName: type.FullName),
             "IsValueTuple" => type.IsValueTuple,
-            _ => Unresolved.Value,
+
+            // Anything not handled above may still be a member that only exists on a type's
+            // declaration (Attributes, Properties, Methods, BaseType, nested types, ...). v3 had a
+            // single Type abstraction that carried both the reference-level facts and the declared
+            // members, so templates freely wrote things like `parameter.Type.Properties` or
+            // `method.Type.Attributes`. v4 split the two, and the reference side silently reported
+            // these as unresolved, which made such loops yield nothing instead of failing loudly.
+            // Resolving the declaration restores the v3 surface for types inside the compilation;
+            // external types (BCL, third-party) have no declaration here and stay unresolved.
+            _ => ResolveTypeReferenceDeclaredMember(type: type, identifier: identifier, state: state),
         };
+    }
+
+    /// <summary>
+    /// Resolves an identifier that a type <em>reference</em> does not itself answer, by falling
+    /// back to the type's <em>declaration</em>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the template-expression half of the declaration-vs-reference fix; the code-model
+    /// half lives in <c>MappedCodeType</c> / <c>DeclaredTypeMembers</c>. Both exist for the same
+    /// reason: v3 exposed one <c>Type</c> abstraction carrying both reference-level facts and
+    /// declared members, so templates were written to reach straight through a reference to
+    /// declared members. v4 split the two and the reference side stopped answering, silently.
+    /// </para>
+    /// <para>
+    /// Handling this generically rather than by enumerating identifiers is deliberate. The bug
+    /// recurred because fixes kept being made one member at a time, so each newly-noticed
+    /// identifier needed its own patch and any member nobody happened to exercise stayed broken.
+    /// Delegating the whole unmatched set to the declaration resolver closes the category rather
+    /// than individual instances of it.
+    /// </para>
+    /// <para>
+    /// Returning <c>Unresolved</c> when no declaration is available is correct rather than a
+    /// fallback: the type is external to the compilation (BCL, third-party assembly) and there is
+    /// no declaration to consult.
+    /// </para>
+    /// </remarks>
+    /// <param name="type">The type reference whose identifier could not be resolved directly.</param>
+    /// <param name="identifier">The unresolved identifier to look up on the declaration.</param>
+    /// <param name="state">Render state used to locate the declaration; may be <see langword="null"/>.</param>
+    private object? ResolveTypeReferenceDeclaredMember(
+        TypeMetadataReference type,
+        string identifier,
+        RenderState? state)
+    {
+        if (state is null
+            || !state.TryResolveType(fullName: type.FullName, type: out var declaration))
+        {
+            return Unresolved.Value;
+        }
+
+        return ResolveType(type: declaration, identifier: identifier, state: state);
     }
 #pragma warning restore MA0051
 

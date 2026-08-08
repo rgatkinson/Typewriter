@@ -10,4 +10,5 @@ internal sealed record TemplateRenderResult(
     string? OutputDirectory,
     bool? Utf8Bom,
     bool? GenerateFileHeader,
-    bool? InsertFinalNewline = null);
+    bool? InsertFinalNewline = null,
+    int FinalNewlineCount = 1);

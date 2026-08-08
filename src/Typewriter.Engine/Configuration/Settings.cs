@@ -108,6 +108,12 @@ public class Settings
     /// </summary>
     public virtual bool? FinalNewlineGeneration { get; private set; }
 
+    /// <summary>
+    /// Gets the number of newlines the generated file ends with when
+    /// <see cref="FinalNewlineGeneration"/> is enabled. Defaults to a single newline.
+    /// </summary>
+    public virtual int FinalNewlineCount { get; private set; } = 1;
+
     public virtual string TemplatePath { get; init; } = string.Empty;
 
     public virtual ILog Log { get; init; } = NullLog.Instance;
@@ -297,10 +303,32 @@ public class Settings
 
     public virtual Settings EnableFinalNewlineGeneration()
     {
+        return EnableFinalNewlineGeneration(count: 1);
+    }
+
+    /// <summary>
+    /// Ends the generated file with exactly <paramref name="count"/> newlines.
+    /// </summary>
+    /// <param name="count">
+    /// The number of newlines the file must end with. One produces a conventional
+    /// single trailing newline; two leaves a blank final line, which separates this
+    /// file's content from the next when outputs are concatenated.
+    /// </param>
+    public virtual Settings EnableFinalNewlineGeneration(int count)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value: count);
+
         FinalNewlineGeneration = true;
+        FinalNewlineCount = count;
         return this;
     }
 
+    /// <summary>
+    /// Leaves the end of the generated file exactly as the template produced it: no
+    /// trailing newline is appended, and no existing trailing newlines are removed.
+    /// This opts out of both the <c>output.insertFinalNewline</c> configuration value
+    /// and <see cref="EnableFinalNewlineGeneration(int)"/> normalization.
+    /// </summary>
     public virtual Settings DisableFinalNewlineGeneration()
     {
         FinalNewlineGeneration = false;

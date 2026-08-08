@@ -593,40 +593,90 @@ internal sealed class TemplateCodeModelAdapterFactory
         return enumModel;
     }
 
+    // Builds the one set of declared-member factories that BOTH the declaration path
+    // (CreateType(TypeMetadata)) and the reference path (CreateType(TypeMetadataReference)) consume.
+    //
+    // This method is the fix for the declaration-vs-reference split bug. Previously each path had
+    // its own hand-written list of member assignments; the reference path's list was shorter, so
+    // declared members were silently empty when reached through a reference. Because the lists were
+    // maintained independently, the bug regressed every time a member was added to one path only.
+    // Routing both paths through here makes that class of omission structurally impossible.
+    //
+    // See DeclaredTypeMembers for why these are delegates rather than materialised values (short
+    // version: eager construction on the reference path recurses until the stack overflows).
+    private DeclaredTypeMembers CreateDeclaredTypeMembers(
+        TypeMetadata type,
+        Func<Typewriter.CodeModel.IAttributeCollection> attributes)
+    {
+        return new DeclaredTypeMembers
+        {
+            Attributes = attributes,
+            BaseClass = () => CreateBaseClass(type: type),
+            ContainingClass = () => CreateContainingClass(type: type),
+            DocComment = () => CreateDocComment(docComment: type.DocComment, parent: null),
+            Interfaces = () => CreateInterfaces(type: type),
+            Constants = () => new Typewriter.CodeModel.ConstantCollection(
+                items: type.Constants.Select(selector: constant => CreateConstant(constant: constant, parent: null))),
+            Delegates = () => new Typewriter.CodeModel.DelegateCollection(
+                items: type.Delegates.Select(selector: @delegate => CreateDelegate(@delegate: @delegate, parent: null))),
+            Fields = () => new Typewriter.CodeModel.FieldCollection(
+                items: type.Fields.Select(selector: field => CreateField(field: field, parent: null))),
+            Methods = () => new Typewriter.CodeModel.MethodCollection(
+                items: type.Methods.Select(selector: method => CreateMethod(method: method, parent: null))),
+            Properties = () => new Typewriter.CodeModel.PropertyCollection(
+                items: type.Properties.Select(selector: property => CreateProperty(property: property, parent: null))),
+            StaticReadOnlyFields = () => new Typewriter.CodeModel.StaticReadOnlyFieldCollection(
+                items: type.StaticReadOnlyFields.Select(selector: field => CreateStaticReadOnlyField(field: field, parent: null))),
+            NestedClasses = () => new Typewriter.CodeModel.ClassCollection(items: type.NestedClasses.Select(selector: CreateClass)),
+            NestedEnums = () => new Typewriter.CodeModel.EnumCollection(items: type.NestedEnums.Select(selector: CreateEnum)),
+            NestedInterfaces = () => new Typewriter.CodeModel.InterfaceCollection(items: type.NestedInterfaces.Select(selector: CreateInterface)),
+            NestedRecords = () => new Typewriter.CodeModel.RecordCollection(items: type.NestedRecords.Select(selector: CreateRecord)),
+            NestedStructs = () => new Typewriter.CodeModel.StructCollection(items: type.NestedStructs.Select(selector: CreateStruct)),
+            TypeParameters = () => CreateTypeParameters(typeParameters: type.TypeParameters, parent: null),
+        };
+    }
+
     private CodeType CreateType(TypeMetadata type)
     {
+        // The declaration path invokes the shared factories immediately. Unlike the reference path
+        // there is no construction cycle to break here, so there is nothing to defer.
+        var members = CreateDeclaredTypeMembers(
+            type: type,
+            attributes: () => CreateAttributes(attributes: type.Attributes, parent: null));
+
         return new CodeType
         {
             AssemblyName = ResolveAssemblyName(assemblyName: type.AssemblyName),
             Name = type.Name,
             FullName = FormatGenericFullName(type: type),
             Namespace = type.Namespace,
-            Attributes = CreateAttributes(attributes: type.Attributes, parent: null),
-            BaseClass = CreateBaseClass(type: type),
-            ContainingClass = CreateContainingClass(type: type),
-            DocComment = CreateDocComment(docComment: type.DocComment, parent: null),
             FileLocations = type.FileLocations,
             IsDefined = true,
             IsEnum = type.Kind == TypeMetadataKind.Enum,
             IsGeneric = type.TypeParameters.Count > 0 || type.TypeArguments.Count > 0,
             IsStruct = type.Kind == TypeMetadataKind.Struct,
-            Interfaces = CreateInterfaces(type: type),
-            Constants = new Typewriter.CodeModel.ConstantCollection(items: type.Constants.Select(selector: constant => CreateConstant(constant: constant, parent: null))),
-            Delegates = new Typewriter.CodeModel.DelegateCollection(items: type.Delegates.Select(selector: @delegate => CreateDelegate(@delegate: @delegate, parent: null))),
-            Fields = new Typewriter.CodeModel.FieldCollection(items: type.Fields.Select(selector: field => CreateField(field: field, parent: null))),
-            Methods = new Typewriter.CodeModel.MethodCollection(items: type.Methods.Select(selector: method => CreateMethod(method: method, parent: null))),
-            NestedClasses = new Typewriter.CodeModel.ClassCollection(items: type.NestedClasses.Select(selector: CreateClass)),
-            NestedEnums = new Typewriter.CodeModel.EnumCollection(items: type.NestedEnums.Select(selector: CreateEnum)),
-            NestedInterfaces = new Typewriter.CodeModel.InterfaceCollection(items: type.NestedInterfaces.Select(selector: CreateInterface)),
-            NestedRecords = new Typewriter.CodeModel.RecordCollection(items: type.NestedRecords.Select(selector: CreateRecord)),
-            NestedStructs = new Typewriter.CodeModel.StructCollection(items: type.NestedStructs.Select(selector: CreateStruct)),
-            Properties = new Typewriter.CodeModel.PropertyCollection(items: type.Properties.Select(selector: property => CreateProperty(property: property, parent: null))),
-            StaticReadOnlyFields = new Typewriter.CodeModel.StaticReadOnlyFieldCollection(
-                items: type.StaticReadOnlyFields.Select(selector: field => CreateStaticReadOnlyField(field: field, parent: null))),
             TypeArguments = new Typewriter.CodeModel.TypeCollection(items: type.TypeArguments.Select(selector: argument => CreateType(type: argument))),
-            TypeParameters = CreateTypeParameters(typeParameters: type.TypeParameters, parent: null),
             DefaultValue = GetDefaultValue(type: type),
             Settings = _settings,
+
+            // Declared members, from the shared set.
+            Attributes = members.Attributes(),
+            BaseClass = members.BaseClass(),
+            ContainingClass = members.ContainingClass(),
+            DocComment = members.DocComment(),
+            Interfaces = members.Interfaces(),
+            Constants = members.Constants(),
+            Delegates = members.Delegates(),
+            Fields = members.Fields(),
+            Methods = members.Methods(),
+            NestedClasses = members.NestedClasses(),
+            NestedEnums = members.NestedEnums(),
+            NestedInterfaces = members.NestedInterfaces(),
+            NestedRecords = members.NestedRecords(),
+            NestedStructs = members.NestedStructs(),
+            Properties = members.Properties(),
+            StaticReadOnlyFields = members.StaticReadOnlyFields(),
+            TypeParameters = members.TypeParameters(),
         };
     }
 
@@ -645,15 +695,28 @@ internal sealed class TemplateCodeModelAdapterFactory
             guidType: _settings.GuidTypeGeneration,
             runtimeType: runtimeType);
         var isStruct = typeMetadata?.Kind == TypeMetadataKind.Struct;
+
+        // When the referenced type's declaration is part of the compilation we hand MappedCodeType
+        // the shared declared-member factories, restoring the v3 surface so templates can reach
+        // through a reference to declared members. Types outside the compilation (BCL, third-party
+        // assemblies) have no declaration available, so `members` stays null and MappedCodeType
+        // keeps its inherited empty defaults -- which is the correct answer for them, not a bug.
+        //
+        // These are deliberately passed unevaluated. Invoking them here would recurse without end;
+        // see DeclaredTypeMembers for the full explanation.
+        var members = typeMetadata is null
+            ? null
+            : CreateDeclaredTypeMembers(
+                type: typeMetadata,
+                attributes: () => CreateTypeReferenceAttributes(attributes: typeMetadata.Attributes));
+
         return new MappedCodeType
         {
             AssemblyName = ResolveAssemblyName(assemblyName: type.AssemblyName),
             Name = GetLegacyTypeName(mappedName: mappedName),
             FullName = type.FullName,
             Namespace = type.Namespace,
-            Attributes = typeMetadata is null
-                ? new Typewriter.CodeModel.AttributeCollection()
-                : CreateTypeReferenceAttributes(attributes: typeMetadata.Attributes),
+            Attributes = members is null ? new Typewriter.CodeModel.AttributeCollection() : members.Attributes(),
             ElementType = type.ElementType is null ? null : CreateType(type: type.ElementType, runtimeType: runtimeType),
             IsDate = TypeScriptTemporalTypes.IsLegacyDate(isDateLike: type.IsDateLike, fullName: type.FullName),
             IsDictionary = type.IsDictionary,
@@ -675,6 +738,9 @@ internal sealed class TemplateCodeModelAdapterFactory
             Settings = _settings,
             UseResolvedDefault = _settings.DateLibraryGeneration != Typewriter.Configuration.DateLibrary.Legacy
                                  || runtimeType != FrontendRuntimeTypeKind.Auto,
+            DeclaredMembers = members,
+            FileLocations = typeMetadata?.FileLocations ?? [],
+            IsDefined = typeMetadata is not null,
         };
     }
 

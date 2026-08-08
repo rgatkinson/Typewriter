@@ -13,4 +13,9 @@ public sealed record GeneratedFile(
     /// <see langword="null"/> when the configured value applies.
     /// </summary>
     public bool? InsertFinalNewline { get; init; }
+
+    /// <summary>
+    /// Gets the number of newlines the file ends with when a final newline is inserted.
+    /// </summary>
+    public int FinalNewlineCount { get; init; } = 1;
 }

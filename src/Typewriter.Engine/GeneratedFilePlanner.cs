@@ -54,7 +54,8 @@ public sealed class GeneratedFilePlanner
         out GeneratedFile? generatedFile,
         out GenerationDiagnostic? diagnostic,
         bool emitHeader = true,
-        bool? insertFinalNewline = null)
+        bool? insertFinalNewline = null,
+        int finalNewlineCount = 1)
 #pragma warning restore CC0091,MA0051,S107,S2325
     {
         ArgumentNullException.ThrowIfNull(argument: workspace);
@@ -108,6 +109,7 @@ public sealed class GeneratedFilePlanner
             Utf8Bom: utf8Bom)
         {
             InsertFinalNewline = insertFinalNewline,
+            FinalNewlineCount = finalNewlineCount,
         };
         if (existing is not null)
         {

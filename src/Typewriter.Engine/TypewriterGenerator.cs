@@ -960,7 +960,8 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
                 generatedFile: out var plannedFile,
                 diagnostic: out var diagnostic,
                 emitHeader: renderResult.GenerateFileHeader ?? request.Configuration.Output.GenerateFileHeader,
-                insertFinalNewline: renderResult.InsertFinalNewline))
+                insertFinalNewline: renderResult.InsertFinalNewline,
+                finalNewlineCount: renderResult.FinalNewlineCount))
         {
             if (diagnostic is not null)
             {

@@ -154,6 +154,45 @@ public sealed class TemplateRendererTests
         output.Should().NotContain("}// From");
     }
 
+    // A blank line authored between a block's last emitted line and its closing ']' is content:
+    // it is what separates this template's output from whatever is concatenated after it. The
+    // leading-layout-newline strip applies to the start of a block body, so it must never consume
+    // this trailing blank. Anavasi concatenates every rendered file into a single All.ts, where a
+    // block that ends flush ran its last line straight into the next file's first line.
+    [Fact]
+    public void RenderKeepsBlankLineAuthoredBeforeClosingBlockDelimiter()
+    {
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "DetectorType",
+                    FullName: "Sample.DetectorType",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Enum,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+
+        // The blank line before ']' is deliberate: it is the separator this template contributes.
+        const string template = "$Enums[\n// From $FullName\nexport enum $Name {}\n]";
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        output.Should().StartWith("// From Sample.DetectorType");
+        output.Should().EndWith("export enum DetectorType {}\n\n");
+    }
+
     // Base type metadata is stored as the open generic definition, so walking $BaseClass must
     // project the definition onto the arguments supplied at the inheritance site. Otherwise an
     // inherited member declared as TIdentity leaks the type parameter name into generated output

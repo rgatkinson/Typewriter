@@ -9,6 +9,12 @@ public static class OutputContentFormatter
         OutputConfiguration output) =>
         Format(content: content, output: output, insertFinalNewline: null);
 
+    public static string Format(
+        string content,
+        OutputConfiguration output,
+        bool? insertFinalNewline) =>
+        Format(content: content, output: output, insertFinalNewline: insertFinalNewline, finalNewlineCount: 1);
+
     /// <summary>
     /// Formats rendered content for output.
     /// </summary>
@@ -18,14 +24,19 @@ public static class OutputContentFormatter
     /// A template-level override for <see cref="OutputConfiguration.InsertFinalNewline"/>,
     /// or <see langword="null"/> to use the configured value.
     /// </param>
+    /// <param name="finalNewlineCount">
+    /// The number of newlines the content must end with when a final newline is requested.
+    /// </param>
     /// <returns>The formatted content.</returns>
     public static string Format(
         string content,
         OutputConfiguration output,
-        bool? insertFinalNewline)
+        bool? insertFinalNewline,
+        int finalNewlineCount)
     {
         ArgumentNullException.ThrowIfNull(argument: content);
         ArgumentNullException.ThrowIfNull(argument: output);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value: finalNewlineCount);
 
         var wantsFinalNewline = insertFinalNewline ?? output.InsertFinalNewline;
         var wantsCrLf = output.Newline.Equals(value: "crlf", comparisonType: StringComparison.OrdinalIgnoreCase);
@@ -53,7 +64,7 @@ public static class OutputContentFormatter
 
         if (wantsFinalNewline)
         {
-            formatted = EnsureFinalNewline(content: formatted);
+            formatted = EnsureFinalNewline(content: formatted, count: finalNewlineCount);
         }
 
         return wantsCrLf
@@ -175,10 +186,22 @@ public static class OutputContentFormatter
         return string.Join(separator: '\n', value: lines);
     }
 
-    private static string EnsureFinalNewline(string content)
+    // Normalizes to exactly 'count' trailing newlines so the file ending is stable no matter how
+    // the template's last block happened to terminate. A count above one leaves blank final lines,
+    // which is what separates this file's content from the next when outputs are concatenated.
+    private static string EnsureFinalNewline(string content, int count)
     {
-        return content.Length == 0 || content.EndsWith(value: '\n')
-            ? content
-            : content + "\n";
+        if (content.Length == 0)
+        {
+            return content;
+        }
+
+        var end = content.Length;
+        while (end > 0 && content[end - 1] == '\n')
+        {
+            end--;
+        }
+
+        return content[..end] + new string(c: '\n', count: count);
     }
 }

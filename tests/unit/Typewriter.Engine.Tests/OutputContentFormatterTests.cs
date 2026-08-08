@@ -97,6 +97,36 @@ public sealed class OutputContentFormatterTests
             .Should().Be("const a = 1;");
     }
 
+    // settings.EnableFinalNewlineGeneration(2) leaves a blank final line so concatenated
+    // outputs stay separated, and it normalizes rather than accumulates on re-generation.
+    [Fact]
+    public void FormatNormalizesToRequestedFinalNewlineCount()
+    {
+        var output = OutputConfiguration.Default with { InsertFinalNewline = true };
+
+        OutputContentFormatter.Format(content: "const a = 1;", output: output, insertFinalNewline: null, finalNewlineCount: 2)
+            .Should().Be("const a = 1;\n\n");
+        OutputContentFormatter.Format(content: "const a = 1;\n", output: output, insertFinalNewline: null, finalNewlineCount: 2)
+            .Should().Be("const a = 1;\n\n");
+        OutputContentFormatter.Format(content: "const a = 1;\n\n\n", output: output, insertFinalNewline: null, finalNewlineCount: 2)
+            .Should().Be("const a = 1;\n\n");
+        OutputContentFormatter.Format(content: "const a = 1;\n\n", output: output, insertFinalNewline: null, finalNewlineCount: 1)
+            .Should().Be("const a = 1;\n");
+    }
+
+    // settings.DisableFinalNewlineGeneration() must leave the generated ending untouched,
+    // neither appending nor trimming trailing newlines.
+    [Fact]
+    public void FormatPreservesGeneratedEndingWhenFinalNewlineDisabled()
+    {
+        var enabled = OutputConfiguration.Default with { InsertFinalNewline = true };
+
+        OutputContentFormatter.Format(content: "const a = 1;\n\n", output: enabled, insertFinalNewline: false, finalNewlineCount: 1)
+            .Should().Be("const a = 1;\n\n");
+        OutputContentFormatter.Format(content: "const a = 1;", output: enabled, insertFinalNewline: false, finalNewlineCount: 2)
+            .Should().Be("const a = 1;");
+    }
+
     [Fact]
     public void FormatAppliesCrlfAfterFormatting()
     {
