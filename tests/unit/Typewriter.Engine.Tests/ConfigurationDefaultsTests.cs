@@ -141,6 +141,53 @@ public sealed class ConfigurationDefaultsTests
     }
 
     [Fact]
+    public void RenderResultCarriesGenerateFileHeaderFromConfigurationAndTemplateOverride()
+    {
+        var metadata = CreateNullableEmailMetadata();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var headerDefaults = TemplateRenderDefaults.FromConfiguration(
+            configuration: TypewriterConfiguration.Default);
+
+        var configuredDiagnostics = new List<GenerationDiagnostic>();
+        var configuredDocument = TemplateDocument.Parse(
+            template: new TemplateFile(
+                Path: Path.Combine(path1: Path.GetTempPath(), path2: "configuredHeader.tst"),
+                Content: """
+                         ${
+                             Template(Settings settings)
+                             {
+                             }
+                         }
+                         // output: configuredHeader.ts
+                         $Classes[$Name]
+                         """),
+            diagnostics: configuredDiagnostics);
+        var configuredResult = renderer.RenderTemplate(template: configuredDocument, metadata: metadata, diagnostics: configuredDiagnostics, defaults: headerDefaults);
+
+        var overriddenDiagnostics = new List<GenerationDiagnostic>();
+        var overriddenDocument = TemplateDocument.Parse(
+            template: new TemplateFile(
+                Path: Path.Combine(path1: Path.GetTempPath(), path2: "overriddenHeader.tst"),
+                Content: """
+                         ${
+                             Template(Settings settings)
+                             {
+                                 settings.DisableFileHeaderGeneration();
+                             }
+                         }
+                         // output: overriddenHeader.ts
+                         $Classes[$Name]
+                         """),
+            diagnostics: overriddenDiagnostics);
+        var overriddenResult = renderer.RenderTemplate(template: overriddenDocument, metadata: metadata, diagnostics: overriddenDiagnostics, defaults: headerDefaults);
+
+        configuredDiagnostics.Should().BeEmpty();
+        overriddenDiagnostics.Should().BeEmpty();
+        configuredResult.GenerateFileHeader.Should().BeTrue();
+        overriddenResult.GenerateFileHeader.Should().BeFalse();
+    }
+
+    [Fact]
     public void RenderUsesConfiguredQuoteStyleForDefaults()
     {
         var metadata = CreateGuidIdMetadata();

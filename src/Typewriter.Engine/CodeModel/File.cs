@@ -28,6 +28,21 @@ public class File : Item
     public virtual IInterfaceCollection Interfaces { get; init; } = new InterfaceCollection();
 
     /// <summary>
+    /// Gets the file name of the source file including its extension, for example
+    /// <c>UserModel.cs</c>. Mirrors <see cref="System.IO.Path.GetFileName(string)"/>.
+    /// Template shorthand: <c>$FileName</c>.
+    /// </summary>
+    public virtual string FileName { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Gets the file name of the source file without its extension, for example
+    /// <c>UserModel</c>. Mirrors <see cref="System.IO.Path.GetFileNameWithoutExtension(string)"/>
+    /// and has the same value as <see cref="Item.Name"/>. Template shorthand:
+    /// <c>$FileNameWithoutExtension</c>.
+    /// </summary>
+    public virtual string FileNameWithoutExtension { get; init; } = string.Empty;
+
+    /// <summary>
     /// Gets the full path of the source file.
     /// </summary>
     public virtual string Path { get; init; } = string.Empty;

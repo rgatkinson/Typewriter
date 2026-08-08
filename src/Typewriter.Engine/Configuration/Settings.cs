@@ -92,6 +92,8 @@ public class Settings
 
     public virtual bool Utf8BomGeneration { get; private set; } = true;
 
+    public virtual bool FileHeaderGeneration { get; private set; } = true;
+
     public virtual string TemplatePath { get; init; } = string.Empty;
 
     public virtual ILog Log { get; init; } = NullLog.Instance;
@@ -267,9 +269,16 @@ public class Settings
         return this;
     }
 
+    public virtual Settings DisableFileHeaderGeneration()
+    {
+        FileHeaderGeneration = false;
+        return this;
+    }
+
     internal void ApplyConfigurationDefaults(
         bool strictNullGeneration,
         bool utf8BomGeneration,
+        bool fileHeaderGeneration,
         char stringLiteralCharacter,
         string dateTypeGeneration,
         string dateInitializerGeneration,
@@ -285,6 +294,7 @@ public class Settings
     {
         StrictNullGeneration = strictNullGeneration;
         Utf8BomGeneration = utf8BomGeneration;
+        FileHeaderGeneration = fileHeaderGeneration;
         _stringLiteralCharacter = stringLiteralCharacter;
         UseDateType(dateType: dateTypeGeneration);
         UseDateInitializer(dateInitializer: dateInitializerGeneration);

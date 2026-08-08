@@ -10,4 +10,5 @@ internal static class DiagnosticCodes
     public const string TemplateLog = "TW0007";
     public const string DuplicateGeneratedOutput = "TW0008";
     public const string IncludedProjectNotFound = "TW0009";
+    public const string NoMatchingRootItems = "TW0010";
 }

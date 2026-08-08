@@ -762,6 +762,280 @@ public sealed class TypewriterGeneratorWorkspaceTests
     }
 
     [Fact]
+    public async Task GenerateAsyncExposesSourceFileNameWithAndWithoutExtensionToOutputFilenameFactory()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            var templatePath = Path.Combine(path1: directory, path2: "Services.tst");
+            await File.WriteAllTextAsync(path: projectPath, contents: "<Project />");
+
+            var messages = CreateClassMetadata(name: "Messages");
+            var metadataProvider = new CapturingMetadataProvider(
+                types: [messages],
+                sourceFiles:
+                [
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "Messages.cs"), Types: [messages]),
+                ]);
+            var generator = new TypewriterGenerator(
+                templateDiscovery: new StaticTemplateDiscovery(
+                    templates: new TemplateFile(
+                        Path: templatePath,
+                        Content: """
+                                 ${
+                                     Template(Settings settings)
+                                     {
+                                         settings.OutputFilenameFactory = file => file.FileName.Replace(".cs", ".tw");                                     }
+                                 }
+                                 $Classes[
+                                 export class $Name {
+                                 }
+                                 ]
+                                 """)),
+                metadataProvider: metadataProvider,
+                fileWriter: new PassthroughFileWriter());
+
+            var result = await generator.GenerateAsync(
+                request: new GenerationRequest(
+                    WorkspacePath: directory,
+                    ProjectPath: projectPath,
+                    TemplatePath: templatePath,
+                    Mode: GenerationMode.Generate,
+                    Configuration: TypewriterConfiguration.Default),
+                cancellationToken: CancellationToken.None);
+
+            result.Success.Should().BeTrue(because: string.Join(separator: Environment.NewLine, values: result.Diagnostics.Select(selector: diagnostic => diagnostic.Message)));
+            var generatedFile = result.GeneratedFiles.Should().ContainSingle().Which;
+            generatedFile.Path.Should().Be(Path.Combine(path1: directory, path2: "Messages.tw"));
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsyncOmitsGenerateFileHeaderWhenDisabled()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            var templatePath = Path.Combine(path1: directory, path2: "Services.tst");
+            await File.WriteAllTextAsync(path: projectPath, contents: "<Project />");
+
+            var messages = CreateClassMetadata(name: "Messages");
+            var metadataProvider = new CapturingMetadataProvider(
+                types: [messages],
+                sourceFiles:
+                [
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "Messages.cs"), Types: [messages]),
+                ]);
+            var generator = new TypewriterGenerator(
+                templateDiscovery: new StaticTemplateDiscovery(
+                    templates: new TemplateFile(
+                        Path: templatePath,
+                        Content: """
+                                 $Classes[
+                                 export class $Name {
+                                 }
+                                 ]
+                                 """)),
+                metadataProvider: metadataProvider,
+                fileWriter: new PassthroughFileWriter());
+
+            var configuration = TypewriterConfiguration.Default with
+            {
+                Output = TypewriterConfiguration.Default.Output with { GenerateFileHeader = false },
+            };
+
+            var result = await generator.GenerateAsync(
+                request: new GenerationRequest(
+                    WorkspacePath: directory,
+                    ProjectPath: projectPath,
+                    TemplatePath: templatePath,
+                    Mode: GenerationMode.Generate,
+                    Configuration: configuration),
+                cancellationToken: CancellationToken.None);
+
+            result.Success.Should().BeTrue(because: string.Join(separator: Environment.NewLine, values: result.Diagnostics.Select(selector: diagnostic => diagnostic.Message)));
+            var generatedFile = result.GeneratedFiles.Should().ContainSingle().Which;
+            generatedFile.Content.Should().NotContain("auto-generated");
+            generatedFile.Content.TrimStart('\r', '\n').Should().StartWith("export class Messages");
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsyncOmitsFileHeaderWhenTemplateDisablesIt()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            var templatePath = Path.Combine(path1: directory, path2: "Services.tst");
+            await File.WriteAllTextAsync(path: projectPath, contents: "<Project />");
+
+            var messages = CreateClassMetadata(name: "Messages");
+            var metadataProvider = new CapturingMetadataProvider(
+                types: [messages],
+                sourceFiles:
+                [
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "Messages.cs"), Types: [messages]),
+                ]);
+            var generator = new TypewriterGenerator(
+                templateDiscovery: new StaticTemplateDiscovery(
+                    templates: new TemplateFile(
+                        Path: templatePath,
+                        Content: """
+                                 ${
+                                     Template(Settings settings) {
+                                         settings.DisableFileHeaderGeneration();
+                                     }
+                                 }
+                                 $Classes[
+                                 export class $Name {
+                                 }
+                                 ]
+                                 """)),
+                metadataProvider: metadataProvider,
+                fileWriter: new PassthroughFileWriter());
+
+            var result = await generator.GenerateAsync(
+                request: new GenerationRequest(
+                    WorkspacePath: directory,
+                    ProjectPath: projectPath,
+                    TemplatePath: templatePath,
+                    Mode: GenerationMode.Generate,
+                    Configuration: TypewriterConfiguration.Default),
+                cancellationToken: CancellationToken.None);
+
+            result.Success.Should().BeTrue(because: string.Join(separator: Environment.NewLine, values: result.Diagnostics.Select(selector: diagnostic => diagnostic.Message)));
+            var generatedFile = result.GeneratedFiles.Should().ContainSingle().Which;
+            generatedFile.Content.Should().NotContain("auto-generated");
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsyncOverwritesUnheaderedFileWhenGenerateFileHeaderIsDisabled()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            var templatePath = Path.Combine(path1: directory, path2: "Services.tst");
+            var outputPath = Path.Combine(path1: directory, path2: "Services.ts");
+            await File.WriteAllTextAsync(path: projectPath, contents: "<Project />");
+            await File.WriteAllTextAsync(path: outputPath, contents: "export class Stale {\n}\n");
+
+            var messages = CreateClassMetadata(name: "Messages");
+            var metadataProvider = new CapturingMetadataProvider(
+                types: [messages],
+                sourceFiles:
+                [
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "Messages.cs"), Types: [messages]),
+                ]);
+            var generator = new TypewriterGenerator(
+                templateDiscovery: new StaticTemplateDiscovery(
+                    templates: new TemplateFile(
+                        Path: templatePath,
+                        Content: """
+                                 $Classes[
+                                 export class $Name {
+                                 }
+                                 ]
+                                 """)),
+                metadataProvider: metadataProvider,
+                fileWriter: new PassthroughFileWriter());
+
+            var configuration = TypewriterConfiguration.Default with
+            {
+                Output = TypewriterConfiguration.Default.Output with { GenerateFileHeader = false },
+            };
+
+            var result = await generator.GenerateAsync(
+                request: new GenerationRequest(
+                    WorkspacePath: directory,
+                    ProjectPath: projectPath,
+                    TemplatePath: templatePath,
+                    Mode: GenerationMode.Generate,
+                    Configuration: configuration),
+                cancellationToken: CancellationToken.None);
+
+            result.Diagnostics.Should().NotContain(predicate: diagnostic => string.Equals(diagnostic.Code, "TW0006", StringComparison.Ordinal));
+            result.Success.Should().BeTrue();
+            result.GeneratedFiles.Should().ContainSingle();
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsyncExposesFileNameWithoutExtensionMatchingLegacyName()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            var templatePath = Path.Combine(path1: directory, path2: "Services.tst");
+            await File.WriteAllTextAsync(path: projectPath, contents: "<Project />");
+
+            var messages = CreateClassMetadata(name: "Messages");
+            var metadataProvider = new CapturingMetadataProvider(
+                types: [messages],
+                sourceFiles:
+                [
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "Messages.cs"), Types: [messages]),
+                ]);
+            var generator = new TypewriterGenerator(
+                templateDiscovery: new StaticTemplateDiscovery(
+                    templates: new TemplateFile(
+                        Path: templatePath,
+                        Content: """
+                                 ${
+                                     Template(Settings settings)
+                                     {
+                                         settings.OutputFilenameFactory = file => $"{file.FileNameWithoutExtension}-{file.Name}.tw";
+                                     }
+                                 }
+                                 $Classes[
+                                 export class $Name {
+                                 }
+                                 ]
+                                 """)),
+                metadataProvider: metadataProvider,
+                fileWriter: new PassthroughFileWriter());
+
+            var result = await generator.GenerateAsync(
+                request: new GenerationRequest(
+                    WorkspacePath: directory,
+                    ProjectPath: projectPath,
+                    TemplatePath: templatePath,
+                    Mode: GenerationMode.Generate,
+                    Configuration: TypewriterConfiguration.Default),
+                cancellationToken: CancellationToken.None);
+
+            result.Success.Should().BeTrue(because: string.Join(separator: Environment.NewLine, values: result.Diagnostics.Select(selector: diagnostic => diagnostic.Message)));
+            var generatedFile = result.GeneratedFiles.Should().ContainSingle().Which;
+            generatedFile.Path.Should().Be(Path.Combine(path1: directory, path2: "Messages-Messages.tw"));
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
     public async Task GenerateAsyncFansOutBySourceFileWhenOutputFilenameFactoryIsConfigured()
     {
         var directory = CreateProjectDirectory();
@@ -996,6 +1270,112 @@ public sealed class TypewriterGeneratorWorkspaceTests
                 .Which.Content.Should().Contain("first");
             secondResult.GeneratedFiles.Should().ContainSingle()
                 .Which.Content.Should().Contain("other");
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsyncDoesNotReportInfoWhenSomeSourceFilesMatchRootItems()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            var templatePath = Path.Combine(path1: directory, path2: "Models.tst");
+            await File.WriteAllTextAsync(path: projectPath, contents: "<Project />");
+
+            var userModel = CreateClassMetadata(name: "UserDto");
+            var skippedModel = CreateClassMetadata(name: "Ignored");
+            var skippedPath = Path.Combine(path1: directory, path2: "Ignored.cs");
+            var metadataProvider = new CapturingMetadataProvider(
+                types: [userModel, skippedModel],
+                sourceFiles:
+                [
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "UserDto.cs"), Types: [userModel]),
+                    new SourceFileMetadata(Path: skippedPath, Types: [skippedModel]),
+                ]);
+            var generator = new TypewriterGenerator(
+                templateDiscovery: new StaticTemplateDiscovery(
+                    templates: new TemplateFile(
+                        Path: templatePath,
+                        Content: """
+                                 $Classes(Name=UserDto)[
+                                 export class $Name {
+                                 }
+                                 ]
+                                 """)),
+                metadataProvider: metadataProvider,
+                fileWriter: new PassthroughFileWriter());
+
+            var result = await generator.GenerateAsync(
+                request: new GenerationRequest(
+                    WorkspacePath: directory,
+                    ProjectPath: projectPath,
+                    TemplatePath: templatePath,
+                    Mode: GenerationMode.Generate,
+                    Configuration: TypewriterConfiguration.Default),
+                cancellationToken: CancellationToken.None);
+
+            result.Success.Should().BeTrue();
+            result.GeneratedFiles.Should().ContainSingle();
+            result.Diagnostics.Should().NotContain(predicate: diagnostic => diagnostic.Code == "TW0010");
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
+    public async Task GenerateAsyncReportsInfoWhenTemplateMatchesNoRootItemsAtAll()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            var templatePath = Path.Combine(path1: directory, path2: "Models.tst");
+            await File.WriteAllTextAsync(path: projectPath, contents: "<Project />");
+
+            var firstModel = CreateClassMetadata(name: "UserDto");
+            var secondModel = CreateClassMetadata(name: "Ignored");
+            var metadataProvider = new CapturingMetadataProvider(
+                types: [firstModel, secondModel],
+                sourceFiles:
+                [
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "UserDto.cs"), Types: [firstModel]),
+                    new SourceFileMetadata(Path: Path.Combine(path1: directory, path2: "Ignored.cs"), Types: [secondModel]),
+                ]);
+            var generator = new TypewriterGenerator(
+                templateDiscovery: new StaticTemplateDiscovery(
+                    templates: new TemplateFile(
+                        Path: templatePath,
+                        Content: """
+                                 $Classes(Name=NoSuchClass)[
+                                 export class $Name {
+                                 }
+                                 ]
+                                 """)),
+                metadataProvider: metadataProvider,
+                fileWriter: new PassthroughFileWriter());
+
+            var result = await generator.GenerateAsync(
+                request: new GenerationRequest(
+                    WorkspacePath: directory,
+                    ProjectPath: projectPath,
+                    TemplatePath: templatePath,
+                    Mode: GenerationMode.Generate,
+                    Configuration: TypewriterConfiguration.Default),
+                cancellationToken: CancellationToken.None);
+
+            result.Success.Should().BeTrue();
+            result.GeneratedFiles.Should().BeEmpty();
+            result.Diagnostics.Should().ContainSingle(predicate: diagnostic => diagnostic.Code == "TW0010")
+                .Which.Should().Match<GenerationDiagnostic>(predicate: diagnostic =>
+                    diagnostic.Severity == DiagnosticSeverity.Info
+                    && diagnostic.File == templatePath);
         }
         finally
         {

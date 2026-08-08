@@ -1690,6 +1690,140 @@ public sealed class TemplateRendererTests
     }
 
     [Fact]
+    public void RenderInvokesCompiledHelperFromLambdaFilterBody()
+    {
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "AppMessages",
+                    FullName: "Sample.Messaging.AppMessages",
+                    Namespace: "Sample.Messaging",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+                new TypeMetadata(
+                    Name: "Excluded",
+                    FullName: "Sample.Other.Excluded",
+                    Namespace: "Sample.Other",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+        const string template = """
+            ${
+                bool WantedClass(Class x) {
+                    return x.Namespace.Equals("Sample.Messaging");
+                }
+            }
+            $Classes(x => WantedClass(x))[
+            // $FullName]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        diagnostics.Should().BeEmpty();
+        output.Should().Contain("Sample.Messaging.AppMessages");
+        output.Should().NotContain("Sample.Other.Excluded");
+    }
+
+    [Fact]
+    public void RenderReportsUnknownHelperUsedAsLambdaFilterBody()
+    {
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "AppMessages",
+                    FullName: "Sample.Messaging.AppMessages",
+                    Namespace: "Sample.Messaging",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+        const string template = """
+            ${
+                bool WantedClass(Class x) {
+                    return true;
+                }
+            }
+            $Classes(x => WantedClas(x))[
+            // $FullName]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        _ = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        diagnostics.Should().Contain(predicate: diagnostic =>
+            diagnostic.Severity == DiagnosticSeverity.Error
+            && diagnostic.Message.Contains("WantedClas"));
+    }
+
+    [Theory]
+    [InlineData("WantedClass(x)", "WantedClass")]
+    [InlineData("  WantedClass( x )  ", "WantedClass")]
+    [InlineData("(WantedClass(x))", "WantedClass")]
+    [InlineData("Wanted_Class2(x)", "Wanted_Class2")]
+    public void TryParseCompiledPredicateInvocationAcceptsSingleHelperCall(
+        string expression,
+        string expectedMethodName)
+    {
+        var parsed = TemplateRenderer.TryParseCompiledPredicateInvocation(
+            expression: expression,
+            parameterName: "x",
+            methodName: out var methodName);
+
+        parsed.Should().BeTrue();
+        methodName.Should().Be(expectedMethodName);
+    }
+
+    // Each of these is a compound or otherwise non-conforming body. Treating any of them as a
+    // single helper invocation would dispatch the whole expression to one compiled method and
+    // silently change which items the filter selects.
+    [Theory]
+    [InlineData("WantedClass(x) && Other(x)")]
+    [InlineData("Other(x) || WantedClass(x)")]
+    [InlineData("Helper(a, x) || Ignore(x)")]
+    [InlineData("!WantedClass(x)")]
+    [InlineData("WantedClass(x).Value")]
+    [InlineData("x.Name == \"Foo\"")]
+    [InlineData("WantedClass(y)")]
+    [InlineData("obj.WantedClass(x)")]
+    [InlineData("(x)")]
+    public void TryParseCompiledPredicateInvocationRejectsNonSingleHelperCall(string expression)
+    {
+        var parsed = TemplateRenderer.TryParseCompiledPredicateInvocation(
+            expression: expression,
+            parameterName: "x",
+            methodName: out _);
+
+        parsed.Should().BeFalse();
+    }
+
+    [Fact]
     public void RenderSupportsInlineLambdaFilters()
     {
         var metadata = new ProjectMetadata(

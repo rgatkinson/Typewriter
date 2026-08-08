@@ -60,6 +60,37 @@ public sealed class TypewriterConfigurationLoaderTests
     }
 
     [Fact]
+    public async Task LoadAsyncReadsGenerateFileHeaderOption()
+    {
+        var root = CreateProjectDirectory();
+        try
+        {
+            TypewriterConfiguration.Default.Output.GenerateFileHeader.Should().BeTrue();
+
+            await File.WriteAllTextAsync(
+                path: Path.Combine(path1: root, path2: "typewriter.json"),
+                contents: """
+                          {
+                            "output": {
+                              "generateFileHeader": false
+                            }
+                          }
+                          """);
+
+            var configuration = await TypewriterConfigurationLoader.LoadAsync(
+                workspacePath: root,
+                projectPath: null,
+                cancellationToken: CancellationToken.None);
+
+            configuration.Output.GenerateFileHeader.Should().BeFalse();
+        }
+        finally
+        {
+            Directory.Delete(path: root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task LoadAsyncReadsFormattingOptions()
     {
         var root = CreateProjectDirectory();

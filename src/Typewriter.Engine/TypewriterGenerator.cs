@@ -583,6 +583,7 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
                         renderContexts: renderContexts,
                         metadataIndex: templateIndex,
                         incrementalChangedSourcePaths: incrementalChangedSourcePaths);
+                    var matchedAnySourceFile = false;
                     foreach (var sourceContext in renderContexts)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
@@ -611,6 +612,8 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
                             continue;
                         }
 
+                        matchedAnySourceFile = true;
+
                         sourceRenderResult = ApplyLegacySourceOutputPath(
                             sourceFile: sourceContext.SourceFile,
                             renderResult: sourceRenderResult,
@@ -624,6 +627,18 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
                             generatedFiles: generatedFiles,
                             plannedOutputPaths: plannedOutputPaths,
                             cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
+                    }
+
+                    if (!matchedAnySourceFile && renderContexts.Count > 0)
+                    {
+                        diagnostics.Add(
+                            item: new GenerationDiagnostic(
+                                File: template.Path,
+                                Line: null,
+                                Column: null,
+                                Severity: DiagnosticSeverity.Info,
+                                Message: $"Template '{Path.GetFileName(path: template.Path)}' produced no output because no root collection items matched its filters in any of the {renderContexts.Count} source file(s) examined.",
+                                Code: DiagnosticCodes.NoMatchingRootItems));
                     }
 
                     continue;
@@ -765,7 +780,8 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
                 fileNameConvention: request.Configuration.Output.FileNameConvention,
                 utf8Bom: renderResult.Utf8Bom,
                 generatedFile: out var plannedFile,
-                diagnostic: out var diagnostic))
+                diagnostic: out var diagnostic,
+                emitHeader: renderResult.GenerateFileHeader ?? request.Configuration.Output.GenerateFileHeader))
         {
             if (diagnostic is not null)
             {

@@ -75,7 +75,8 @@ public sealed class TemplateRenderer
             IsSingleFileMode: settings?.IsSingleFileMode == true,
             OutputExtension: settings?.OutputExtension ?? ".ts",
             OutputDirectory: settings?.OutputDirectory,
-            Utf8Bom: settings?.Utf8BomGeneration);
+            Utf8Bom: settings?.Utf8BomGeneration,
+            GenerateFileHeader: settings?.FileHeaderGeneration);
     }
 
 #pragma warning disable SA1204
@@ -105,6 +106,47 @@ public sealed class TemplateRenderer
             IncludedProjects: settings?.IncludedProjects ?? []);
     }
 #pragma warning restore SA1204
+
+    // Recognizes a lambda body that is a single call to a template-declared method using the
+    // lambda parameter as its only argument, for example "x => WantedClass(x)".
+    // Internal so the parsing contract can be verified directly; misclassifying a compound
+    // expression here silently changes which items a filter selects.
+    internal static bool TryParseCompiledPredicateInvocation(
+        string expression,
+        string parameterName,
+        out string methodName)
+    {
+        methodName = string.Empty;
+        var trimmed = StripOuterParentheses(expression: expression.Trim());
+        var openIndex = trimmed.IndexOf(value: '(', comparisonType: StringComparison.Ordinal);
+        if (openIndex <= 0)
+        {
+            return false;
+        }
+
+        // The opening parenthesis must close at the very end, otherwise the body is a larger
+        // expression that merely begins with a call, such as "Foo(x) && Bar(x)".
+        if (FindClosingParenthesis(expression: trimmed, openIndex: openIndex) != trimmed.Length - 1)
+        {
+            return false;
+        }
+
+        var candidate = trimmed[..openIndex].Trim();
+        if (candidate.Length == 0
+            || !candidate.All(predicate: character => char.IsLetterOrDigit(c: character) || character is '_'))
+        {
+            return false;
+        }
+
+        var argument = trimmed[(openIndex + 1)..^1].Trim();
+        if (!argument.Equals(value: parameterName, comparisonType: StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        methodName = candidate;
+        return true;
+    }
 
     private static string? FormatCollectionScalar(IEnumerable collection)
     {
@@ -1936,6 +1978,28 @@ public sealed class TemplateRenderer
         filtered = [];
         if (TryParseLambda(value: filter, parameterName: out var parameterName, expression: out var expression))
         {
+            // A lambda body such as "x => WantedClass(x)" refers to a method declared in the
+            // template's compiled code block. The string-based predicate evaluator cannot
+            // resolve those, so dispatch them to the compiled template helper instead of
+            // silently evaluating to false.
+            if (TryParseCompiledPredicateInvocation(
+                    expression: expression,
+                    parameterName: parameterName,
+                    methodName: out var lambdaMethodName))
+            {
+                if (state.HasCompiledMethod(methodName: lambdaMethodName))
+                {
+                    filtered = items.Where(predicate: item => state.InvokeCompiledPredicate(methodName: lambdaMethodName, context: item));
+                    return true;
+                }
+
+                // The body looks exactly like a helper call but no such helper exists. Falling
+                // through to the string evaluator would filter every item out silently, which
+                // is almost always a misspelled helper name rather than an intended filter.
+                state.AddUnknownFilterMethod(methodName: lambdaMethodName, filter: filter);
+                return true;
+            }
+
             filtered = items.Where(predicate: item => EvaluatePredicate(expression: expression, parameterName: parameterName, context: item));
             return true;
         }
@@ -3405,6 +3469,25 @@ public sealed class TemplateRenderer
             out TypeMetadata type)
         {
             return _typesByFullName.TryGetValue(key: fullName, value: out type!);
+        }
+
+        public void AddUnknownFilterMethod(
+            string methodName,
+            string filter)
+        {
+            if (!_reportedUnknownIdentifiers.Add(item: "filter:" + methodName))
+            {
+                return;
+            }
+
+            _diagnostics.Add(
+                item: new GenerationDiagnostic(
+                    File: _templatePath,
+                    Line: null,
+                    Column: null,
+                    Severity: DiagnosticSeverity.Error,
+                    Message: $"Unknown template member: {methodName}. The filter '{filter}' calls a method that is not declared in the template's code block.",
+                    Code: DiagnosticCodes.UnknownTemplateMember));
         }
 
         public void AddUnknownIdentifier(

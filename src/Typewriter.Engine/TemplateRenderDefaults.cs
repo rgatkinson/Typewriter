@@ -21,6 +21,8 @@ public sealed record TemplateRenderDefaults(
 {
     public DateLibrary DateLibraryGeneration { get; init; } = DateLibrary.Legacy;
 
+    public bool GenerateFileHeader { get; init; } = true;
+
     // Matches the original Typewriter defaults: strict null unions and a UTF-8 BOM.
     public static TemplateRenderDefaults Default { get; } = new(
         StrictNullGeneration: true,
@@ -50,6 +52,7 @@ public sealed record TemplateRenderDefaults(
             DecimalInitializerGeneration: configuration.Output.DecimalInitializer)
         {
             DateLibraryGeneration = configuration.Output.DateLibrary,
+            GenerateFileHeader = configuration.Output.GenerateFileHeader,
         };
     }
 

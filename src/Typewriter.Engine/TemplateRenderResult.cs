@@ -8,4 +8,5 @@ internal sealed record TemplateRenderResult(
     bool IsSingleFileMode,
     string OutputExtension,
     string? OutputDirectory,
-    bool? Utf8Bom);
+    bool? Utf8Bom,
+    bool? GenerateFileHeader);

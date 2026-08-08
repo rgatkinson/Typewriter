@@ -73,13 +73,13 @@ public sealed class ExternalRecipeCompatibilityTests
         diagnostics.Should().NotContain(diagnostic => diagnostic.Severity != DiagnosticSeverity.Info);
         output.Should().Contain("import { SimpleModel } from './SimpleModel';");
         output.Should().Contain("middleName?: string | null;");
-        output.Should().Contain("this.id = initObj.id ?? 0;");
-        output.Should().Contain("this.simpleModels = initObj.simpleModels ?? [];");
-        output.Should().Contain("this.firstName = initObj.firstName ?? '';");
-        output.Should().Contain("this.middleName = initObj.middleName ?? null;");
-        output.Should().Contain("this.lastName = initObj.lastName ?? '';");
-        output.Should().Contain("this.firstSet = initObj.firstSet ?? FirstSet.ValA;");
-        output.Should().Contain("this.secondSet = initObj.secondSet ?? SecondSet.ValA;");
+        output.Should().Contain("this.id = initObj.id || 0;");
+        output.Should().Contain("this.simpleModels = initObj.simpleModels || [];");
+        output.Should().Contain("this.firstName = initObj.firstName || '';");
+        output.Should().Contain("this.middleName = initObj.middleName || null;");
+        output.Should().Contain("this.lastName = initObj.lastName || '';");
+        output.Should().Contain("this.firstSet = initObj.firstSet || FirstSet.ValA;");
+        output.Should().Contain("this.secondSet = initObj.secondSet || SecondSet.ValA;");
     }
 
     [Fact]

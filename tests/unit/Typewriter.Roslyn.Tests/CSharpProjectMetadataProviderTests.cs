@@ -1305,6 +1305,66 @@ public sealed class CSharpProjectMetadataProviderTests
         }
     }
 
+    [Fact]
+    public async Task GetMetadataExposesKeyAndValueTypeArgumentsForInheritedDictionaries()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            await File.WriteAllTextAsync(
+                path: projectPath,
+                contents: """
+                          <Project Sdk="Microsoft.NET.Sdk">
+                            <PropertyGroup>
+                              <TargetFramework>net10.0</TargetFramework>
+                              <Nullable>enable</Nullable>
+                              <ImplicitUsings>enable</ImplicitUsings>
+                            </PropertyGroup>
+                          </Project>
+                          """);
+            await File.WriteAllTextAsync(
+                path: Path.Combine(path1: directory, path2: "Models.cs"),
+                contents: """
+                          namespace Sample;
+
+                          using System.Collections.Generic;
+
+                          public sealed class Message
+                          {
+                              public string Text { get; set; } = string.Empty;
+                          }
+
+                          public class AllMessages : Dictionary<string, Message>
+                          {
+                          }
+
+                          public sealed class Envelope
+                          {
+                              public AllMessages Messages { get; set; } = new();
+                          }
+                          """);
+            var provider = new CSharpProjectMetadataProvider();
+
+            var metadata = await provider.GetMetadataAsync(
+                project: new ProjectContext(ProjectPath: projectPath, WorkspacePath: directory),
+                cancellationToken: CancellationToken.None);
+
+            metadata.Diagnostics.Should().NotContain(diagnostic => diagnostic.Severity == Typewriter.Abstractions.DiagnosticSeverity.Error);
+            var envelope = metadata.Types.Should().ContainSingle(type => type.Name == "Envelope").Which;
+            var messages = envelope.Properties.Should().ContainSingle(property => property.Name == "Messages").Which;
+            messages.Type.IsDictionary.Should().BeTrue();
+            messages.Type.TypeArguments.Should().HaveCount(expected: 2);
+            messages.Type.TypeArguments[index: 0].Name.Should().Be("String");
+            messages.Type.TypeArguments[index: 1].Name.Should().Be("Message");
+        }
+        finally
+        {
+            CSharpProjectMetadataProvider.ClearCachesForTests();
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
     private static string CreateProjectDirectory()
     {
         var directory = Path.Combine(

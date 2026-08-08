@@ -246,6 +246,8 @@ internal sealed class TemplateCodeModelAdapterFactory
         return new CodeFile
         {
             Name = Path.GetFileNameWithoutExtension(path: filePath),
+            FileName = Path.GetFileName(path: filePath),
+            FileNameWithoutExtension = Path.GetFileNameWithoutExtension(path: filePath),
             FullName = filePath,
             Path = filePath,
             Classes = new Typewriter.CodeModel.ClassCollection(

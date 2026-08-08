@@ -79,6 +79,18 @@ public sealed record OutputConfiguration(
 
     public DateLibrary DateLibrary { get; init; } = DateLibrary.Legacy;
 
+    /// <summary>
+    /// Gets a value indicating whether the Typewriter generated-file header is
+    /// written at the top of every generated file.
+    /// </summary>
+    /// <remarks>
+    /// The header doubles as the marker that identifies files Typewriter owns.
+    /// When it is disabled, Typewriter can no longer distinguish its own output
+    /// from hand-written files, so the refuse-to-overwrite guard is relaxed for
+    /// the affected outputs.
+    /// </remarks>
+    public bool GenerateFileHeader { get; init; } = true;
+
     public static OutputConfiguration Default { get; } = new(
         Newline: "lf",
         Encoding: "utf-8",

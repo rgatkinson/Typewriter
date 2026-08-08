@@ -6,8 +6,7 @@ namespace Typewriter.Buildalyzer;
 public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
 {
     private const string CreateSatelliteAssembliesDependsOnPropertyName = "CreateSatelliteAssembliesDependsOn";
-    private const string PrepareForRunDependsOnPropertyName = "PrepareForRunDependsOn";
-    private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
+    private const string PrepareForRunDependsOnPropertyName = "PrepareForRunDependsOn";    private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
 
     public Task<ProjectLoadResult> LoadAsync(
         ProjectContext project,
@@ -370,6 +369,14 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
         environmentOptions.GlobalProperties[key: CreateSatelliteAssembliesDependsOnPropertyName] = string.Empty;
         environmentOptions.GlobalProperties[key: PrepareForRunDependsOnPropertyName] = string.Empty;
         environmentOptions.GlobalProperties[key: "UseSharedCompilation"] = "false";
+
+        // Typewriter only needs source files and references from the design-time build. The static web
+        // assets pipeline writes shared cache files under obj (for example rpswa.dswa.cache.json) and
+        // fails with IOException when another build or IDE process holds them. Disabling it avoids the
+        // contention, and a failure there would otherwise cascade into spurious "type or namespace does
+        // not exist" errors in every project that references the affected one.
+        environmentOptions.GlobalProperties[key: "StaticWebAssetsEnabled"] = "false";
+        environmentOptions.GlobalProperties[key: "GenerateStaticWebAssetsManifest"] = "false";
         environmentOptions.EnvironmentVariables[key: "MSBUILDDISABLENODEREUSE"] = "1";
 
         return environmentOptions;

@@ -52,7 +52,8 @@ public sealed class GeneratedFilePlanner
         FileNameConvention fileNameConvention,
         bool? utf8Bom,
         out GeneratedFile? generatedFile,
-        out GenerationDiagnostic? diagnostic)
+        out GenerationDiagnostic? diagnostic,
+        bool emitHeader = true)
 #pragma warning restore CC0091,MA0051,S107,S2325
     {
         ArgumentNullException.ThrowIfNull(argument: workspace);
@@ -84,7 +85,8 @@ public sealed class GeneratedFilePlanner
 #pragma warning disable SCS0018,SEC0116
             existing = File.ReadAllText(path: resolvedOutputPath);
 #pragma warning restore SCS0018,SEC0116
-            if (!HasGeneratedHeader(content: existing)
+            if (emitHeader
+                && !HasGeneratedHeader(content: existing)
                 && !string.Equals(a: existing, b: content, comparisonType: StringComparison.Ordinal))
             {
                 diagnostic = new GenerationDiagnostic(
@@ -100,7 +102,7 @@ public sealed class GeneratedFilePlanner
 
         generatedFile = new GeneratedFile(
             Path: resolvedOutputPath,
-            Content: EnsureGeneratedHeader(content: content),
+            Content: emitHeader ? EnsureGeneratedHeader(content: content) : content,
             Changed: true,
             Utf8Bom: utf8Bom);
         if (existing is not null)

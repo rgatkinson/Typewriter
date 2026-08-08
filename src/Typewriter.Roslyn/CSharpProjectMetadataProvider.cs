@@ -311,6 +311,7 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                 cancellationToken: cancellationToken)
             .Where(predicate: diagnostic => diagnostic.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error)
             .Select(selector: ToGenerationDiagnostic)
+            .Distinct()
             .ToArray();
 
         var sourceSymbols = GetSourceSymbols(compilation: compilation, syntaxTrees: syntaxTrees, cancellationToken: cancellationToken);
@@ -1499,6 +1500,7 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
         }
 
         var elementType = GetElementType(symbol: symbol, visitedSymbols: visitedSymbols);
+        var isDictionary = IsDictionary(symbol: symbol);
         var typeArguments = symbol is INamedTypeSymbol genericType
             ? genericType.TypeArguments
                 .Zip(
@@ -1510,13 +1512,23 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                 .ToArray()
             : [];
 
+        // A type can be a dictionary through inheritance (for example
+        // "class Messages : Dictionary<string, Message>"). Such a type declares no type
+        // arguments of its own, so surface the key/value arguments of the implemented
+        // dictionary interface instead; templates rely on TypeArguments[0]/[1] being present
+        // whenever IsDictionary is true.
+        if (isDictionary && typeArguments.Length != 2)
+        {
+            typeArguments = GetDictionaryTypeArguments(symbol: symbol, visitedSymbols: visitedSymbols) ?? typeArguments;
+        }
+
         return new TypeMetadataReference(
             Name: GetDisplayName(symbol: symbol),
             FullName: GetFullName(symbol: symbol),
             Namespace: GetNamespace(symbol: symbol),
             IsNullable: nullableAnnotation == NullableAnnotation.Annotated,
             IsCollection: elementType is not null,
-            IsDictionary: IsDictionary(symbol: symbol),
+            IsDictionary: isDictionary,
             IsEnum: IsEnum(symbol: symbol),
             IsPrimitive: IsPrimitive(symbol: symbol),
             IsDateLike: IsDateLike(symbol: symbol),
@@ -1610,6 +1622,41 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                             || fullName.Equals(value: "System.Collections.Generic.Dictionary", comparisonType: StringComparison.Ordinal))
                         && candidate.TypeArguments.Length == 2;
                 });
+    }
+
+    private static TypeMetadataReference[]? GetDictionaryTypeArguments(
+        ITypeSymbol symbol,
+        ISet<ITypeSymbol> visitedSymbols)
+    {
+        if (symbol is not INamedTypeSymbol namedType)
+        {
+            return null;
+        }
+
+        var dictionary = namedType.AllInterfaces
+            .Concat(second: [namedType])
+            .FirstOrDefault(
+                predicate: candidate =>
+                {
+                    var fullName = GetFullName(symbol: candidate.OriginalDefinition);
+                    return (fullName.Equals(value: "System.Collections.Generic.IDictionary", comparisonType: StringComparison.Ordinal)
+                            || fullName.Equals(value: "System.Collections.Generic.IReadOnlyDictionary", comparisonType: StringComparison.Ordinal))
+                        && candidate.TypeArguments.Length == 2;
+                });
+
+        if (dictionary is null)
+        {
+            return null;
+        }
+
+        return dictionary.TypeArguments
+            .Zip(
+                second: dictionary.TypeArgumentNullableAnnotations,
+                resultSelector: (argument, annotation) => CreateTypeReference(
+                    symbol: argument,
+                    nullableAnnotation: annotation,
+                    visitedSymbols: visitedSymbols))
+            .ToArray();
     }
 
     private static bool IsEnum(ITypeSymbol symbol)
@@ -1935,13 +1982,31 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
     private static GenerationDiagnostic ToGenerationDiagnostic(Diagnostic diagnostic)
     {
         var location = diagnostic.Location.GetLineSpan();
+        var severity = IsUnresolvedReferenceDiagnostic(diagnostic: diagnostic)
+            ? Typewriter.Abstractions.DiagnosticSeverity.Warning
+            : Typewriter.Abstractions.DiagnosticSeverity.Error;
         return new GenerationDiagnostic(
             File: location.Path,
             Line: location.StartLinePosition.Line + 1,
             Column: location.StartLinePosition.Character + 1,
-            Severity: Typewriter.Abstractions.DiagnosticSeverity.Error,
+            Severity: severity,
             Message: diagnostic.GetMessage(formatProvider: CultureInfo.InvariantCulture),
             Code: "TW0004");
+    }
+
+    /// <summary>
+    /// Determines whether a compilation error merely reports an unresolved namespace or type.
+    /// Templates commonly generate the very types their inputs reference, so an as-yet-empty
+    /// output folder would otherwise make it impossible to bootstrap generation. This is
+    /// deliberately limited to namespace and type lookup failures: member-level failures such
+    /// as CS0117/CS1061, and unknown-name failures such as CS0103, usually indicate genuinely
+    /// broken code rather than not-yet-generated code, and remain fatal.
+    /// </summary>
+    /// <param name="diagnostic">The compilation diagnostic to classify.</param>
+    /// <returns><see langword="true"/> when the diagnostic reports an unresolved namespace or type.</returns>
+    private static bool IsUnresolvedReferenceDiagnostic(Diagnostic diagnostic)
+    {
+        return diagnostic.Id is "CS0234" or "CS0246";
     }
 
     private sealed record SourceSymbols(
