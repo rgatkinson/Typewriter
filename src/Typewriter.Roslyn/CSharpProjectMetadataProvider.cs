@@ -933,6 +933,14 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                 .Where(predicate: path => !string.IsNullOrWhiteSpace(value: path))
                 .Select(selector: Path.GetFullPath)
                 .Distinct(comparer: StringComparer.OrdinalIgnoreCase)
+
+                // Ordered case-insensitively so FileLocations[0] is a stable "primary declaring
+                // file" for partial types. Roslyn returns symbol.Locations in syntax-tree order,
+                // which varies with compilation input order, so without this sort the file chosen
+                // to own a Combined-mode type (or unattributed Partial-mode members) could change
+                // between builds. This matches v3.0.1, which sorted with StringComparer
+                // .OrdinalIgnoreCase before taking the first location.
+                .OrderBy(keySelector: path => path, comparer: StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
             Documentation = docComment?.Summary,
             DocComment = docComment,
@@ -2080,31 +2088,28 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
     /// </summary>
     /// <param name="symbol">The declared symbol to attribute.</param>
     /// <returns>A single full source path, or an empty sequence when the symbol has no source location.</returns>
+    // Returns every source file that declares part of the symbol.
+    //
+    // A partial type is declared across several files, and each of those files is a legitimate
+    // render target: Typewriter's default PartialRenderingMode.Partial renders one output per
+    // declaring file, containing only the members declared in that file. Deciding which files
+    // participate is therefore a *rendering* concern owned by the engine, not by this provider -
+    // the provider is cached per project and has no access to per-template settings.
+    //
+    // Earlier v4 builds collapsed multi-file symbols to a single "preferred" path here, which
+    // hardcoded the non-default PartialRenderingMode.Combined behaviour: a partial class split
+    // across N files produced one output instead of N, silently merging members that the template
+    // expected to be grouped per file. Return all declaring paths and let
+    // TypewriterGenerator apply the configured PartialRenderingMode.
     private static IEnumerable<string> GetDeclaringFilePaths(ISymbol symbol)
     {
-        var paths = symbol.DeclaringSyntaxReferences
+        return symbol.DeclaringSyntaxReferences
             .Select(selector: reference => reference.SyntaxTree.FilePath)
             .Where(predicate: path => !string.IsNullOrWhiteSpace(value: path))
             .Select(selector: path => Path.GetFullPath(path: path))
             .Distinct(comparer: StringComparer.OrdinalIgnoreCase)
             .OrderBy(keySelector: path => path, comparer: StringComparer.OrdinalIgnoreCase)
             .ToArray();
-
-        if (paths.Length <= 1)
-        {
-            return paths;
-        }
-
-        // symbol.Name is the simple name without generic arity, so a partial Foo<T> declared in
-        // Foo.cs still matches its preferred file.
-        var preferred = Array.Find(
-            array: paths,
-            match: path => string.Equals(
-                a: Path.GetFileNameWithoutExtension(path: path),
-                b: symbol.Name,
-                comparisonType: StringComparison.OrdinalIgnoreCase));
-
-        return [preferred ?? paths[0]];
     }
 
     private static string TrimAttributeSuffix(string name)

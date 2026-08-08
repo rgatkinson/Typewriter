@@ -111,7 +111,8 @@ public sealed class TemplateRenderer
         return new TemplateRenderInspection(
             IsSingleFileMode: settings?.IsSingleFileMode == true,
             UsesOutputFilenameFactory: state.UsesOutputFilenameFactory,
-            IncludedProjects: settings?.IncludedProjects ?? []);
+            IncludedProjects: settings?.IncludedProjects ?? [],
+            PartialRenderingMode: settings?.PartialRenderingMode ?? Typewriter.Configuration.PartialRenderingMode.Partial);
     }
 #pragma warning restore SA1204
 

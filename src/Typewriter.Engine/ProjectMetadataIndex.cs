@@ -64,12 +64,20 @@ internal sealed class ProjectMetadataIndex
         private readonly IReadOnlyDictionary<string, HashSet<string>> _declaredTypesBySourceFile;
         private readonly IReadOnlyDictionary<string, HashSet<string>> _referencedTypesBySourceFile;
 
+        // Maps each file that declares part of a partial type to the other files declaring that
+        // same type. Partial siblings never reference one another, so the type-reference graph
+        // above cannot connect them; without this map an edit to one declaring file leaves the
+        // others (and, under Combined, the single file that actually owns the output) stale.
+        private readonly IReadOnlyDictionary<string, HashSet<string>> _partialSiblingsBySourceFile;
+
         private SourceFileDependencyIndex(
             IReadOnlyDictionary<string, HashSet<string>> declaredTypesBySourceFile,
-            IReadOnlyDictionary<string, HashSet<string>> referencedTypesBySourceFile)
+            IReadOnlyDictionary<string, HashSet<string>> referencedTypesBySourceFile,
+            IReadOnlyDictionary<string, HashSet<string>> partialSiblingsBySourceFile)
         {
             _declaredTypesBySourceFile = declaredTypesBySourceFile;
             _referencedTypesBySourceFile = referencedTypesBySourceFile;
+            _partialSiblingsBySourceFile = partialSiblingsBySourceFile;
         }
 
         public static SourceFileDependencyIndex Build(ProjectMetadata metadata)
@@ -99,7 +107,8 @@ internal sealed class ProjectMetadataIndex
 
             return new SourceFileDependencyIndex(
                 declaredTypesBySourceFile: declaredTypesBySourceFile,
-                referencedTypesBySourceFile: referencedTypesBySourceFile);
+                referencedTypesBySourceFile: referencedTypesBySourceFile,
+                partialSiblingsBySourceFile: BuildPartialSiblings(metadata: metadata));
         }
 
         public IReadOnlyCollection<string> GetAffectedSourceFiles(IReadOnlyCollection<string> changedSourcePaths)
@@ -114,6 +123,18 @@ internal sealed class ProjectMetadataIndex
                     dirtyTypes.UnionWith(other: declaredTypes);
                 }
             }
+
+            // Editing one declaration of a partial type invalidates the type as a whole, so pull in
+            // its other declaring files before the reference walk below. This restores the v3.0.1
+            // behaviour where rendering a non-primary declaration triggered a render of the file
+            // that owns the output. It matters most under PartialRenderingMode.Combined, where the
+            // type is emitted only on its primary file: without this, editing any other declaring
+            // file yields no render context at all and the output silently goes stale.
+            ExpandPartialSiblings(
+                affectedFiles: affectedFiles,
+                dirtyTypes: dirtyTypes,
+                partialSiblingsBySourceFile: _partialSiblingsBySourceFile,
+                declaredTypesBySourceFile: _declaredTypesBySourceFile);
 
             var expanded = affectedFiles.Count > 0;
             while (expanded)
@@ -132,11 +153,67 @@ internal sealed class ProjectMetadataIndex
                         dirtyTypes.UnionWith(other: declaredTypes);
                     }
 
+                    // A file reached through the reference graph may itself declare part of a
+                    // partial type, so its siblings must be pulled in as well.
+                    ExpandPartialSiblings(
+                        affectedFiles: affectedFiles,
+                        dirtyTypes: dirtyTypes,
+                        partialSiblingsBySourceFile: _partialSiblingsBySourceFile,
+                        declaredTypesBySourceFile: _declaredTypesBySourceFile);
+
                     expanded = true;
                 }
             }
 
             return affectedFiles;
+        }
+
+        /// <summary>
+        /// Expands <paramref name="affectedFiles"/> to a fixpoint over partial-type siblings.
+        /// </summary>
+        /// <param name="affectedFiles">The affected file set, extended in place.</param>
+        /// <param name="dirtyTypes">The dirty type set, extended with any newly affected file's declarations.</param>
+        /// <param name="partialSiblingsBySourceFile">Map from a declaring file to its partial siblings.</param>
+        /// <param name="declaredTypesBySourceFile">Map from a source file to the types it declares.</param>
+        /// <remarks>
+        /// Loops until no new file is added because a sibling may itself be a declaration of a
+        /// different partial type, chaining one group of declaring files into another.
+        /// </remarks>
+        private static void ExpandPartialSiblings(
+            HashSet<string> affectedFiles,
+            HashSet<string> dirtyTypes,
+            IReadOnlyDictionary<string, HashSet<string>> partialSiblingsBySourceFile,
+            IReadOnlyDictionary<string, HashSet<string>> declaredTypesBySourceFile)
+        {
+            if (partialSiblingsBySourceFile.Count == 0)
+            {
+                return;
+            }
+
+            var pending = new Queue<string>(collection: affectedFiles);
+            while (pending.Count > 0)
+            {
+                var current = pending.Dequeue();
+                if (!partialSiblingsBySourceFile.TryGetValue(key: current, value: out var siblings))
+                {
+                    continue;
+                }
+
+                foreach (var sibling in siblings)
+                {
+                    if (!affectedFiles.Add(item: sibling))
+                    {
+                        continue;
+                    }
+
+                    if (declaredTypesBySourceFile.TryGetValue(key: sibling, value: out var siblingDeclaredTypes))
+                    {
+                        dirtyTypes.UnionWith(other: siblingDeclaredTypes);
+                    }
+
+                    pending.Enqueue(item: sibling);
+                }
+            }
         }
 
         private static void CollectType(
@@ -160,6 +237,56 @@ internal sealed class ProjectMetadataIndex
             {
                 CollectType(type: nestedType, declaredTypes: declaredTypes, referencedTypes: referencedTypes, visitedReferences: visitedReferences);
             }
+        }
+
+        /// <summary>
+        /// Builds the file-to-sibling-files map for every partial type in the project.
+        /// </summary>
+        /// <param name="metadata">The project metadata to scan for multi-file type declarations.</param>
+        /// <returns>
+        /// A case-insensitive map from a declaring file to the other files declaring the same
+        /// partial type(s). Files that declare no partial type are absent from the map.
+        /// </returns>
+        /// <remarks>
+        /// A type declared across several files reports every declaring file in
+        /// <see cref="TypeMetadata.FileLocations"/>, so grouping by that list is sufficient; types
+        /// with a single location are skipped because they have no siblings. Nested types are
+        /// walked as well, since a nested type can be partial independently of its container.
+        /// </remarks>
+        private static Dictionary<string, HashSet<string>> BuildPartialSiblings(ProjectMetadata metadata)
+        {
+            var partialSiblingsBySourceFile = new Dictionary<string, HashSet<string>>(comparer: StringComparer.OrdinalIgnoreCase);
+
+            void Link(TypeMetadata type)
+            {
+                if (type.FileLocations.Count > 1)
+                {
+                    foreach (var declaringPath in type.FileLocations)
+                    {
+                        if (!partialSiblingsBySourceFile.TryGetValue(key: declaringPath, value: out var siblings))
+                        {
+                            siblings = new HashSet<string>(comparer: StringComparer.OrdinalIgnoreCase);
+                            partialSiblingsBySourceFile[key: declaringPath] = siblings;
+                        }
+
+                        // Every declaring file (including this one) is added; the self-entry is
+                        // harmless because the caller only unions into an already-affected set.
+                        siblings.UnionWith(other: type.FileLocations);
+                    }
+                }
+
+                foreach (var nestedType in EnumerateNestedTypes(type: type))
+                {
+                    Link(type: nestedType);
+                }
+            }
+
+            foreach (var type in metadata.Types)
+            {
+                Link(type: type);
+            }
+
+            return partialSiblingsBySourceFile;
         }
 
         private static IEnumerable<TypeMetadata> EnumerateNestedTypes(TypeMetadata type) =>

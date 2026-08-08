@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using Typewriter.Abstractions;
+using Typewriter.Configuration;
 
 namespace Typewriter.Engine;
 
@@ -223,6 +224,12 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
     private static bool RequiresIncludedProjectsInspection(TemplateDocument template) =>
         template.CodeBlocks.Any(predicate: block => block.Content.Contains(value: "IncludeProject", comparisonType: StringComparison.Ordinal));
 
+    // A template that opts into PartialRenderingMode.Combined must be inspected so the setting is
+    // known before render contexts are built. Templates that say nothing keep the Partial default,
+    // which needs no inspection.
+    private static bool RequiresPartialRenderingModeInspection(TemplateDocument template) =>
+        template.CodeBlocks.Any(predicate: block => block.Content.Contains(value: nameof(PartialRenderingMode), comparisonType: StringComparison.Ordinal));
+
     private static TemplateRenderResult ApplyLegacySourceOutputPath(
         SourceFileMetadata sourceFile,
         TemplateRenderResult renderResult,
@@ -269,20 +276,174 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
 
     private static IReadOnlyList<SourceFileRenderContext> CreateSourceFileRenderContexts(
         ProjectMetadata project,
-        ProjectMetadataIndex metadataIndex)
+        ProjectMetadataIndex metadataIndex,
+        PartialRenderingMode partialRenderingMode)
     {
         var contexts = new List<SourceFileRenderContext>();
         foreach (var sourceFile in project.SourceFiles.Where(predicate: sourceFile => sourceFile.Types.Count > 0))
         {
-            var sourceProject = CreateSourceFileProject(project: project, sourceFile: sourceFile);
+            var renderedFile = ApplyPartialRenderingMode(
+                sourceFile: sourceFile,
+                partialRenderingMode: partialRenderingMode);
+            if (renderedFile.Types.Count == 0)
+            {
+                continue;
+            }
+
+            var sourceProject = CreateSourceFileProject(project: project, sourceFile: renderedFile);
             contexts.Add(
                 item: new SourceFileRenderContext(
-                    SourceFile: sourceFile,
+                    SourceFile: renderedFile,
                     Project: sourceProject,
                     MetadataIndex: metadataIndex));
         }
 
         return contexts;
+    }
+
+    /// <summary>
+    /// Applies the template's <see cref="PartialRenderingMode"/> to a single source file's view
+    /// of the types it declares.
+    /// </summary>
+    /// <param name="sourceFile">The source file whose type view is being narrowed.</param>
+    /// <param name="partialRenderingMode">The rendering mode configured by the template.</param>
+    /// <returns>The source file, with partial types narrowed to this file's own members.</returns>
+    /// <remarks>
+    /// <para>
+    /// A partial type is declared across several files and appears in the metadata of each of
+    /// them, carrying the complete, merged member list every time. That is what
+    /// <see cref="PartialRenderingMode.Combined"/> wants, but it is not the default.
+    /// </para>
+    /// <para>
+    /// Under the default <see cref="PartialRenderingMode.Partial"/>, each declaring file must
+    /// render only the members it actually declares, so a partial class split across N files
+    /// produces N outputs that together cover the type exactly once. Without this filtering every
+    /// one of those N outputs repeats the entire type, duplicating members N times.
+    /// </para>
+    /// <para>
+    /// Members are attributed by their recorded source location. Members with no location (for
+    /// example compiler-synthesized ones) are kept on the type's primary file so they are emitted
+    /// exactly once rather than dropped or duplicated.
+    /// </para>
+    /// <para>
+    /// The "primary file" is chosen by <see cref="GetPrimaryDeclaringFile"/>, which picks the
+    /// lowest declaring path case-insensitively so the choice is stable regardless of the order
+    /// the metadata provider reports declarations in.
+    /// </para>
+    /// <para>
+    /// Incremental builds depend on partial-sibling invalidation in
+    /// <c>ProjectMetadataIndex</c>: editing any declaring file must mark every other declaring file
+    /// of that type as affected, otherwise the file that owns the output is never re-rendered.
+    /// </para>
+    /// </remarks>
+    private static SourceFileMetadata ApplyPartialRenderingMode(
+        SourceFileMetadata sourceFile,
+        PartialRenderingMode partialRenderingMode)
+    {
+        if (partialRenderingMode == PartialRenderingMode.Combined)
+        {
+            // Combined renders a partial type exactly once, with all of its members merged. The
+            // metadata already carries the merged member list on every declaring file, so the only
+            // thing needed here is to stop the other declaring files from emitting a duplicate:
+            // the type is kept solely on its primary declaring file. Without this the type is
+            // emitted once per declaring file, producing N identical copies rather than one
+            // combined output.
+            var combinedTypes = sourceFile.Types
+                .Where(predicate: type => type.FileLocations.Count <= 1
+                    || string.Equals(
+                        a: GetPrimaryDeclaringFile(type: type),
+                        b: sourceFile.Path,
+                        comparisonType: StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+
+            return combinedTypes.Length == sourceFile.Types.Count
+                ? sourceFile
+                : sourceFile with { Types = combinedTypes };
+        }
+
+        // Only partial types (declared in more than one file) need filtering; everything else
+        // already belongs wholly to this file.
+        if (!sourceFile.Types.Any(predicate: type => type.FileLocations.Count > 1))
+        {
+            return sourceFile;
+        }
+
+        var types = sourceFile.Types
+            .Select(selector: type => FilterTypeToSourceFile(type: type, path: sourceFile.Path))
+            .ToArray();
+
+        return sourceFile with { Types = types };
+    }
+
+    /// <summary>
+    /// Selects the single declaring file that owns a partial type's combined output and its
+    /// members that carry no source location.
+    /// </summary>
+    /// <param name="type">The type whose declaring files are being considered.</param>
+    /// <returns>The primary declaring file, or <see langword="null"/> if the type has none.</returns>
+    /// <remarks>
+    /// <para>
+    /// The choice must be deterministic: it decides which file emits a Combined-mode type and
+    /// which file absorbs unattributed members, so an unstable choice would silently move
+    /// generated content between output files from one build to the next.
+    /// </para>
+    /// <para>
+    /// The minimum path under <see cref="StringComparer.OrdinalIgnoreCase"/> is used rather than
+    /// simply taking the first entry, because <see cref="TypeMetadata.FileLocations"/> ordering
+    /// originates in the metadata provider. Roslyn reports declaration locations in syntax-tree
+    /// order, which varies with compilation input order. The provider does sort, but relying on
+    /// that here would make correctness depend on a contract owned by another layer; computing the
+    /// minimum makes this method correct for any ordering. This matches v3.0.1, which ordered with
+    /// <c>StringComparer.OrdinalIgnoreCase</c> before taking the first location.
+    /// </para>
+    /// </remarks>
+    private static string? GetPrimaryDeclaringFile(TypeMetadata type)
+    {
+        if (type.FileLocations.Count == 0)
+        {
+            return null;
+        }
+
+        var primary = type.FileLocations[0];
+        for (var index = 1; index < type.FileLocations.Count; index++)
+        {
+            if (StringComparer.OrdinalIgnoreCase.Compare(x: type.FileLocations[index], y: primary) < 0)
+            {
+                primary = type.FileLocations[index];
+            }
+        }
+
+        return primary;
+    }
+
+    private static TypeMetadata FilterTypeToSourceFile(TypeMetadata type, string path)
+    {
+        if (type.FileLocations.Count <= 1)
+        {
+            return type;
+        }
+
+        // The primary file owns any member that cannot be attributed to a specific file, so such
+        // members are emitted exactly once rather than repeated on every declaring file.
+        var isPrimaryFile = string.Equals(
+            a: GetPrimaryDeclaringFile(type: type),
+            b: path,
+            comparisonType: StringComparison.OrdinalIgnoreCase);
+
+        bool DeclaredHere(SourceLocation? location) =>
+            location is null
+                ? isPrimaryFile
+                : string.Equals(a: location.Path, b: path, comparisonType: StringComparison.OrdinalIgnoreCase);
+
+        return type with
+        {
+            Properties = type.Properties.Where(predicate: member => DeclaredHere(location: member.Location)).ToArray(),
+            Methods = type.Methods.Where(predicate: member => DeclaredHere(location: member.Location)).ToArray(),
+            Constants = type.Constants.Where(predicate: member => DeclaredHere(location: member.Location)).ToArray(),
+            Fields = type.Fields.Where(predicate: member => DeclaredHere(location: member.Location)).ToArray(),
+            StaticReadOnlyFields = type.StaticReadOnlyFields.Where(predicate: member => DeclaredHere(location: member.Location)).ToArray(),
+            Events = type.Events.Where(predicate: member => DeclaredHere(location: member.Location)).ToArray(),
+        };
     }
 
     private static TemplateDocument ParseTemplate(
@@ -498,7 +659,11 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
 
         var projectIndex = ProjectMetadataIndex.Create(metadata: project);
         var includedProjectCache = new Dictionary<string, TemplateProjectContext>(comparer: StringComparer.OrdinalIgnoreCase);
-        IReadOnlyList<SourceFileRenderContext>? sourceFileRenderContexts = null;
+
+        // Render contexts are reused across templates that share the project, but the partial
+        // splitting baked into them depends on the template's PartialRenderingMode, so the cache
+        // is keyed by that mode.
+        var sourceFileRenderContextsByMode = new Dictionary<PartialRenderingMode, IReadOnlyList<SourceFileRenderContext>>();
         foreach (var templateFile in templates)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -523,7 +688,8 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
 
                 TemplateRenderInspection? renderInspection = null;
                 if (RequiresSingleFileModeInspection(template: template)
-                    || RequiresIncludedProjectsInspection(template: template))
+                    || RequiresIncludedProjectsInspection(template: template)
+                    || RequiresPartialRenderingModeInspection(template: template))
                 {
                     var inspectionDiagnostics = new List<GenerationDiagnostic>();
                     renderInspection = TemplateRenderer.InspectTemplate(
@@ -569,14 +735,26 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
                     }
 
                     IReadOnlyList<SourceFileRenderContext> renderContexts;
+                    var partialRenderingMode = renderInspection?.PartialRenderingMode ?? PartialRenderingMode.Partial;
                     if (ReferenceEquals(objA: templateProject, objB: project))
                     {
-                        sourceFileRenderContexts ??= CreateSourceFileRenderContexts(project: project, metadataIndex: projectIndex);
-                        renderContexts = sourceFileRenderContexts;
+                        if (!sourceFileRenderContextsByMode.TryGetValue(key: partialRenderingMode, value: out var cachedContexts))
+                        {
+                            cachedContexts = CreateSourceFileRenderContexts(
+                                project: project,
+                                metadataIndex: projectIndex,
+                                partialRenderingMode: partialRenderingMode);
+                            sourceFileRenderContextsByMode[partialRenderingMode] = cachedContexts;
+                        }
+
+                        renderContexts = cachedContexts;
                     }
                     else
                     {
-                        renderContexts = CreateSourceFileRenderContexts(project: templateProject, metadataIndex: templateIndex);
+                        renderContexts = CreateSourceFileRenderContexts(
+                            project: templateProject,
+                            metadataIndex: templateIndex,
+                            partialRenderingMode: partialRenderingMode);
                     }
 
                     renderContexts = FilterSourceFileRenderContexts(
