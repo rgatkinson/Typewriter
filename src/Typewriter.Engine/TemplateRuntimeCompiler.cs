@@ -133,6 +133,7 @@ internal static class TemplateRuntimeCompiler
             strictNullGeneration: defaults.StrictNullGeneration,
             utf8BomGeneration: defaults.Utf8BomGeneration,
             fileHeaderGeneration: defaults.GenerateFileHeader,
+            whitespaceNormalization: defaults.NormalizeWhitespace,
             stringLiteralCharacter: defaults.StringLiteralCharacter,
             dateTypeGeneration: defaults.DateTypeGeneration,
             dateInitializerGeneration: defaults.DateInitializerGeneration,

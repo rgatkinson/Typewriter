@@ -56,15 +56,22 @@ public sealed class TemplateRenderer
         ArgumentNullException.ThrowIfNull(argument: metadata);
         ArgumentNullException.ThrowIfNull(argument: diagnostics);
 
+        var effectiveDefaults = defaults ?? TemplateRenderDefaults.Default;
         using var state = new RenderState(
             template: template,
             metadata: metadata,
             diagnostics: diagnostics,
-            defaults: defaults ?? TemplateRenderDefaults.Default,
+            defaults: effectiveDefaults,
             compiledTemplateFactory: compiledTemplateFactory,
             metadataIndex: metadataIndex);
-        var content = NormalizeRenderedWhitespace(value: RenderCore(template: template.Content, context: metadata, state: state));
+        var rendered = RenderCore(template: template.Content, context: metadata, state: state);
         var settings = state.TemplateSettings;
+
+        // The whitespace pass is cosmetic and can delete blank lines a template meant to emit,
+        // so it is opt-out via typewriter.json or settings.DisableWhitespaceNormalization().
+        var content = settings?.WhitespaceNormalization ?? effectiveDefaults.NormalizeWhitespace
+            ? NormalizeRenderedWhitespace(value: rendered)
+            : rendered;
         var outputPath = template.OutputPath ?? state.ResolveOutputPath();
         state.NotifyRenderComplete();
         return new TemplateRenderResult(
@@ -76,7 +83,8 @@ public sealed class TemplateRenderer
             OutputExtension: settings?.OutputExtension ?? ".ts",
             OutputDirectory: settings?.OutputDirectory,
             Utf8Bom: settings?.Utf8BomGeneration,
-            GenerateFileHeader: settings?.FileHeaderGeneration);
+            GenerateFileHeader: settings?.FileHeaderGeneration,
+            InsertFinalNewline: settings?.FinalNewlineGeneration);
     }
 
 #pragma warning disable SA1204
@@ -1643,6 +1651,29 @@ public sealed class TemplateRenderer
         return true;
     }
 
+    // Templates conventionally put a block body on the line after its opening '[', for example
+    // "$Enums(...)[\n// From $FullName\n...]". For the first rendered item that newline is layout
+    // rather than content, so emitting it verbatim prepends a blank line to the output.
+    // This only holds when nothing has been emitted yet: once any text precedes the block, every
+    // newline in the template - including blank lines deliberately placed between two adjacent
+    // blocks - is authored content and must be preserved verbatim.
+    private static bool IsAtOutputStart(StringBuilder output)
+    {
+        return output.Length == 0;
+    }
+
+    private static string StripLeadingNewline(string block)
+    {
+        if (block.StartsWith(value: "\r\n", comparisonType: StringComparison.Ordinal))
+        {
+            return block[2..];
+        }
+
+        return block.StartsWith(value: '\n') || block.StartsWith(value: '\r')
+            ? block[1..]
+            : block;
+    }
+
     private static string GetName(object item)
     {
         return item switch
@@ -1855,6 +1886,15 @@ public sealed class TemplateRenderer
 
         _ = TryReadBlock(template: template, index: ref index, open: '[', close: ']', block: out var separator);
 
+        // A block body conventionally starts on the line after its opening '[' so the emitted
+        // text lines up in the template. That first newline is layout, not content, so it is
+        // dropped for the first item only: subsequent items still need it to separate them
+        // from the item before. It is only dropped when nothing has been emitted yet; any
+        // newline after that point was authored by the template and must survive verbatim.
+        var firstBlock = IsAtOutputStart(output: output)
+            ? StripLeadingNewline(block: block)
+            : block;
+
         var items = ApplyFilter(items: collection.Cast<object>(), filter: filter, parentContext: context, state: state).ToArray();
         if (context is ProjectMetadata
             && IsRootItemCollection(identifier: identifier))
@@ -1872,7 +1912,7 @@ public sealed class TemplateRenderer
                     output.Append(value: RenderCore(template: separator, context: context, state: state));
                 }
 
-                output.Append(value: RenderCore(template: block, context: items[itemIndex], state: state));
+                output.Append(value: RenderCore(template: itemIndex == 0 ? firstBlock : block, context: items[itemIndex], state: state));
             }
         }
         finally
@@ -2826,7 +2866,7 @@ public sealed class TemplateRenderer
             "IsNullable" => property.Type.IsNullable,
             "IsEnumerable" => property.Type.IsCollection,
             "IsPrimitive" => IsPrimitiveType(type: property.Type),
-            "IsDate" => property.Type.IsDateLike,
+            "IsDate" => TypeScriptTemporalTypes.IsLegacyDate(isDateLike: property.Type.IsDateLike, fullName: property.Type.FullName),
             "HasGetter" => property.HasGetter,
             "HasSetter" => property.HasSetter,
             "IsRequired" => property.IsRequired,
@@ -3107,10 +3147,15 @@ public sealed class TemplateRenderer
             "IsStruct" => state is not null
                 && state.TryResolveType(fullName: type.FullName, type: out var metadata)
                 && metadata.Kind == TypeMetadataKind.Struct,
-            "IsDate" => type.IsDateLike,
+            "IsDate" => TypeScriptTemporalTypes.IsLegacyDate(isDateLike: type.IsDateLike, fullName: type.FullName),
             "IsGuid" => type.FullName.Equals(value: "System.Guid", comparisonType: StringComparison.Ordinal),
-            "IsTimeSpan" => type.FullName.Equals(value: "System.TimeSpan", comparisonType: StringComparison.Ordinal),
-            "IsTask" => IsTaskLike(fullName: type.FullName),
+            "IsTimeSpan" => TypeScriptTemporalTypes.IsDuration(fullName: type.FullName),
+
+            // IsTask is set by the Roslyn provider when it unwraps an awaitable return type, but
+            // metadata from other paths (parameter types, generic arguments, hand-built test
+            // metadata) never carries the flag. The name-based fallback keeps those references
+            // reporting true when they literally are Task/ValueTask types.
+            "IsTask" => type.IsTask || IsTaskLike(fullName: type.FullName),
             "IsValueTuple" => type.IsValueTuple,
             _ => Unresolved.Value,
         };

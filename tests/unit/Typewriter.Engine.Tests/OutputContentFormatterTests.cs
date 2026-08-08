@@ -81,6 +81,22 @@ public sealed class OutputContentFormatterTests
         OutputContentFormatter.Format(content: string.Empty, output: output).Should().BeEmpty();
     }
 
+    // Templates whose body ends at a closing block delimiter emit no trailing newline, so
+    // settings.EnableFinalNewlineGeneration() must be able to override the configured value.
+    [Fact]
+    public void FormatHonorsTemplateOverrideForFinalNewline()
+    {
+        var disabled = OutputConfiguration.Default with { InsertFinalNewline = false };
+        var enabled = OutputConfiguration.Default with { InsertFinalNewline = true };
+
+        OutputContentFormatter.Format(content: "const a = 1;", output: disabled, insertFinalNewline: true)
+            .Should().Be("const a = 1;\n");
+        OutputContentFormatter.Format(content: "const a = 1;", output: enabled, insertFinalNewline: false)
+            .Should().Be("const a = 1;");
+        OutputContentFormatter.Format(content: "const a = 1;", output: disabled, insertFinalNewline: null)
+            .Should().Be("const a = 1;");
+    }
+
     [Fact]
     public void FormatAppliesCrlfAfterFormatting()
     {

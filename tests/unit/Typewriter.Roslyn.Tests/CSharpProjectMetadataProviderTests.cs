@@ -181,7 +181,10 @@ public sealed class CSharpProjectMetadataProviderTests
             apiVersion.ParentTypeFullName.Should().Be(controller.FullName);
             var getAsync = controller.Methods.Should().ContainSingle(method => method.Name == "GetAsync").Which;
             getAsync.Accessibility.Should().Be(MetadataAccessibility.Public);
-            getAsync.ReturnType.Name.Should().Be("Task");
+
+            // Task<User?> is unwrapped to its awaited result for the pre-4.x code model contract.
+            getAsync.ReturnType.Name.Should().Be("User");
+            getAsync.ReturnType.IsTask.Should().BeTrue();
             getAsync.ParentTypeFullName.Should().Be(controller.FullName);
             getAsync.Attributes.Should().Contain(attribute => attribute.Name == "HttpGet");
             getAsync.Attributes
@@ -334,7 +337,12 @@ public sealed class CSharpProjectMetadataProviderTests
             relatedItems.Type.IsDictionary.Should().BeTrue();
             relatedItems.Type.TypeArguments[index: 1].IsNullable.Should().BeTrue();
             var getAsync = enabled.Methods.Should().ContainSingle(method => method.Name == "GetAsync").Which;
-            getAsync.ReturnType.TypeArguments[index: 0].IsNullable.Should().BeTrue();
+
+            // Task<T> is unwrapped to its awaited result, so the nullable annotation of T lands on
+            // the return type itself rather than on a nested type argument.
+            getAsync.ReturnType.Name.Should().Be(expected: "EnabledRegion");
+            getAsync.ReturnType.IsTask.Should().BeTrue();
+            getAsync.ReturnType.IsNullable.Should().BeTrue();
 
             var disabled = metadata.Types.Should().ContainSingle(type => type.Name == "DisabledRegion").Which;
             disabled.IsNullableAware.Should().BeFalse();
@@ -1300,6 +1308,155 @@ public sealed class CSharpProjectMetadataProviderTests
         finally
         {
             MetadataCacheInvalidation.Reset();
+            CSharpProjectMetadataProvider.ClearCachesForTests();
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    // Legacy templates reach the element of a collection through TypeArguments[0] and fall back
+    // to the collection type itself when that is empty. Arrays are not named types, so without
+    // this the fallback fed the array type (display name "Organization[]") into name-building
+    // helpers and produced malformed identifiers such as "IOrganization[]Flat".
+    [Fact]
+    public async Task GetMetadataExposesElementTypeAsTypeArgumentForArrayProperties()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            await File.WriteAllTextAsync(
+                path: projectPath,
+                contents: """
+                          <Project Sdk="Microsoft.NET.Sdk">
+                            <PropertyGroup>
+                              <TargetFramework>net10.0</TargetFramework>
+                              <Nullable>enable</Nullable>
+                              <ImplicitUsings>enable</ImplicitUsings>
+                            </PropertyGroup>
+                          </Project>
+                          """);
+            await File.WriteAllTextAsync(
+                path: Path.Combine(path1: directory, path2: "Models.cs"),
+                contents: """
+                          namespace Sample;
+
+                          using System.Collections.Generic;
+
+                          public sealed class Organization
+                          {
+                              public string Name { get; set; } = string.Empty;
+                          }
+
+                          public sealed class ApplicationUserMisc
+                          {
+                              public Organization[] InvitedOrganizations { get; set; } = [];
+
+                              public List<Organization> OtherOrganizations { get; set; } = new();
+                          }
+                          """);
+            var provider = new CSharpProjectMetadataProvider();
+
+            var metadata = await provider.GetMetadataAsync(
+                project: new ProjectContext(ProjectPath: projectPath, WorkspacePath: directory),
+                cancellationToken: CancellationToken.None);
+
+            metadata.Diagnostics.Should().NotContain(diagnostic => diagnostic.Severity == Typewriter.Abstractions.DiagnosticSeverity.Error);
+            var misc = metadata.Types.Should().ContainSingle(type => type.Name == "ApplicationUserMisc").Which;
+
+            var invited = misc.Properties.Should().ContainSingle(property => property.Name == "InvitedOrganizations").Which;
+            invited.Type.IsCollection.Should().BeTrue();
+            invited.Type.ElementType.Should().NotBeNull();
+            invited.Type.ElementType!.Name.Should().Be(expected: "Organization");
+            invited.Type.TypeArguments.Should().ContainSingle();
+            invited.Type.TypeArguments[index: 0].Name.Should().Be(expected: "Organization");
+
+            // A generic collection already worked; assert parity so both shapes stay aligned.
+            var others = misc.Properties.Should().ContainSingle(property => property.Name == "OtherOrganizations").Which;
+            others.Type.TypeArguments.Should().ContainSingle();
+            others.Type.TypeArguments[index: 0].Name.Should().Be(expected: "Organization");
+        }
+        finally
+        {
+            CSharpProjectMetadataProvider.ClearCachesForTests();
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    // Templates written against the pre-4.x code model treat an async method's return type as the
+    // awaited result, so `Task<Response<bool>>` must surface as `Response<bool>` with
+    // TypeArguments[0] == bool. Exposing the Task itself shifted TypeArguments by one level and
+    // produced nested wrappers such as "Response<IResponse<boolean>Flat>" in generated clients.
+    [Fact]
+    public async Task GetMetadataUnwrapsTaskReturnTypesToTheAwaitedResult()
+    {
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            await File.WriteAllTextAsync(
+                path: projectPath,
+                contents: """
+                          <Project Sdk="Microsoft.NET.Sdk">
+                            <PropertyGroup>
+                              <TargetFramework>net10.0</TargetFramework>
+                              <Nullable>enable</Nullable>
+                              <ImplicitUsings>enable</ImplicitUsings>
+                            </PropertyGroup>
+                          </Project>
+                          """);
+            await File.WriteAllTextAsync(
+                path: Path.Combine(path1: directory, path2: "Models.cs"),
+                contents: """
+                          namespace Sample;
+
+                          using System.Threading.Tasks;
+
+                          public sealed class Response<T>
+                          {
+                              public T Value { get; set; } = default!;
+                          }
+
+                          public sealed class AccountController
+                          {
+                              public Task<Response<bool>> RequestAdminRole() => throw new System.NotImplementedException();
+
+                              public Task Logout() => throw new System.NotImplementedException();
+
+                              public ValueTask<int> Count() => throw new System.NotImplementedException();
+
+                              public Response<bool> Sync() => throw new System.NotImplementedException();
+                          }
+                          """);
+            var provider = new CSharpProjectMetadataProvider();
+
+            var metadata = await provider.GetMetadataAsync(
+                project: new ProjectContext(ProjectPath: projectPath, WorkspacePath: directory),
+                cancellationToken: CancellationToken.None);
+
+            metadata.Diagnostics.Should().NotContain(diagnostic => diagnostic.Severity == Typewriter.Abstractions.DiagnosticSeverity.Error);
+            var controller = metadata.Types.Should().ContainSingle(type => type.Name == "AccountController").Which;
+
+            var requestAdminRole = controller.Methods.Should().ContainSingle(method => method.Name == "RequestAdminRole").Which;
+            requestAdminRole.ReturnType.Name.Should().Be(expected: "Response");
+            requestAdminRole.ReturnType.IsTask.Should().BeTrue();
+            requestAdminRole.ReturnType.TypeArguments.Should().ContainSingle();
+            requestAdminRole.ReturnType.TypeArguments[index: 0].FullName.Should().Be(expected: "System.Boolean");
+
+            var logout = controller.Methods.Should().ContainSingle(method => method.Name == "Logout").Which;
+            logout.ReturnType.FullName.Should().Be(expected: "System.Void");
+            logout.ReturnType.IsTask.Should().BeTrue();
+
+            var count = controller.Methods.Should().ContainSingle(method => method.Name == "Count").Which;
+            count.ReturnType.FullName.Should().Be(expected: "System.Int32");
+            count.ReturnType.IsTask.Should().BeTrue();
+
+            // A synchronous method returning the same payload must be indistinguishable except for IsTask.
+            var sync = controller.Methods.Should().ContainSingle(method => method.Name == "Sync").Which;
+            sync.ReturnType.Name.Should().Be(expected: "Response");
+            sync.ReturnType.IsTask.Should().BeFalse();
+        }
+        finally
+        {
             CSharpProjectMetadataProvider.ClearCachesForTests();
             await DeleteDirectoryWithRetryAsync(directory: directory);
         }

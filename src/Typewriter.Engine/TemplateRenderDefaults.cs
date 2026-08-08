@@ -23,6 +23,8 @@ public sealed record TemplateRenderDefaults(
 
     public bool GenerateFileHeader { get; init; } = true;
 
+    public bool NormalizeWhitespace { get; init; } = true;
+
     // Matches the original Typewriter defaults: strict null unions and a UTF-8 BOM.
     public static TemplateRenderDefaults Default { get; } = new(
         StrictNullGeneration: true,
@@ -53,6 +55,7 @@ public sealed record TemplateRenderDefaults(
         {
             DateLibraryGeneration = configuration.Output.DateLibrary,
             GenerateFileHeader = configuration.Output.GenerateFileHeader,
+            NormalizeWhitespace = configuration.Output.NormalizeWhitespace,
         };
     }
 

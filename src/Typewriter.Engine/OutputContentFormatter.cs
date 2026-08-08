@@ -6,16 +6,33 @@ public static class OutputContentFormatter
 {
     public static string Format(
         string content,
-        OutputConfiguration output)
+        OutputConfiguration output) =>
+        Format(content: content, output: output, insertFinalNewline: null);
+
+    /// <summary>
+    /// Formats rendered content for output.
+    /// </summary>
+    /// <param name="content">The rendered content.</param>
+    /// <param name="output">The output configuration.</param>
+    /// <param name="insertFinalNewline">
+    /// A template-level override for <see cref="OutputConfiguration.InsertFinalNewline"/>,
+    /// or <see langword="null"/> to use the configured value.
+    /// </param>
+    /// <returns>The formatted content.</returns>
+    public static string Format(
+        string content,
+        OutputConfiguration output,
+        bool? insertFinalNewline)
     {
         ArgumentNullException.ThrowIfNull(argument: content);
         ArgumentNullException.ThrowIfNull(argument: output);
 
+        var wantsFinalNewline = insertFinalNewline ?? output.InsertFinalNewline;
         var wantsCrLf = output.Newline.Equals(value: "crlf", comparisonType: StringComparison.OrdinalIgnoreCase);
         if (!wantsCrLf
             && output.IndentStyle == IndentStyle.Preserve
             && !output.TrimTrailingWhitespace
-            && !output.InsertFinalNewline
+            && !wantsFinalNewline
             && !content.Contains(value: "\r", comparisonType: StringComparison.Ordinal))
         {
             return content;
@@ -34,7 +51,7 @@ public static class OutputContentFormatter
             formatted = TrimTrailingWhitespace(content: formatted);
         }
 
-        if (output.InsertFinalNewline)
+        if (wantsFinalNewline)
         {
             formatted = EnsureFinalNewline(content: formatted);
         }

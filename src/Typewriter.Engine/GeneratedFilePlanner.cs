@@ -53,7 +53,8 @@ public sealed class GeneratedFilePlanner
         bool? utf8Bom,
         out GeneratedFile? generatedFile,
         out GenerationDiagnostic? diagnostic,
-        bool emitHeader = true)
+        bool emitHeader = true,
+        bool? insertFinalNewline = null)
 #pragma warning restore CC0091,MA0051,S107,S2325
     {
         ArgumentNullException.ThrowIfNull(argument: workspace);
@@ -104,7 +105,10 @@ public sealed class GeneratedFilePlanner
             Path: resolvedOutputPath,
             Content: emitHeader ? EnsureGeneratedHeader(content: content) : content,
             Changed: true,
-            Utf8Bom: utf8Bom);
+            Utf8Bom: utf8Bom)
+        {
+            InsertFinalNewline = insertFinalNewline,
+        };
         if (existing is not null)
         {
             GeneratedFileExistingContentCache.Set(file: generatedFile, content: existing);

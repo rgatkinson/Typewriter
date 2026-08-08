@@ -91,6 +91,18 @@ public sealed record OutputConfiguration(
     /// </remarks>
     public bool GenerateFileHeader { get; init; } = true;
 
+    /// <summary>
+    /// Gets a value indicating whether rendered output is post-processed to remove
+    /// blank lines that sit immediately after an opening brace or immediately before
+    /// a closing brace.
+    /// </summary>
+    /// <remarks>
+    /// This cosmetic pass can delete blank lines a template deliberately emitted.
+    /// Set it to <see langword="false"/> (or call <c>settings.DisableWhitespaceNormalization()</c>
+    /// from a template) to emit rendered text verbatim.
+    /// </remarks>
+    public bool NormalizeWhitespace { get; init; } = true;
+
     public static OutputConfiguration Default { get; } = new(
         Newline: "lf",
         Encoding: "utf-8",

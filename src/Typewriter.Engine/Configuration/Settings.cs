@@ -94,6 +94,20 @@ public class Settings
 
     public virtual bool FileHeaderGeneration { get; private set; } = true;
 
+    /// <summary>
+    /// Gets a value indicating whether rendered output is post-processed to drop blank
+    /// lines adjacent to braces. Call <see cref="DisableWhitespaceNormalization"/> to emit
+    /// exactly what the template produced.
+    /// </summary>
+    public virtual bool WhitespaceNormalization { get; private set; } = true;
+
+    /// <summary>
+    /// Gets a value indicating whether the generated file ends with a trailing newline.
+    /// <see langword="null"/> means the template expressed no preference and the
+    /// <c>output.insertFinalNewline</c> configuration value applies.
+    /// </summary>
+    public virtual bool? FinalNewlineGeneration { get; private set; }
+
     public virtual string TemplatePath { get; init; } = string.Empty;
 
     public virtual ILog Log { get; init; } = NullLog.Instance;
@@ -275,10 +289,29 @@ public class Settings
         return this;
     }
 
+    public virtual Settings DisableWhitespaceNormalization()
+    {
+        WhitespaceNormalization = false;
+        return this;
+    }
+
+    public virtual Settings EnableFinalNewlineGeneration()
+    {
+        FinalNewlineGeneration = true;
+        return this;
+    }
+
+    public virtual Settings DisableFinalNewlineGeneration()
+    {
+        FinalNewlineGeneration = false;
+        return this;
+    }
+
     internal void ApplyConfigurationDefaults(
         bool strictNullGeneration,
         bool utf8BomGeneration,
         bool fileHeaderGeneration,
+        bool whitespaceNormalization,
         char stringLiteralCharacter,
         string dateTypeGeneration,
         string dateInitializerGeneration,
@@ -295,6 +328,7 @@ public class Settings
         StrictNullGeneration = strictNullGeneration;
         Utf8BomGeneration = utf8BomGeneration;
         FileHeaderGeneration = fileHeaderGeneration;
+        WhitespaceNormalization = whitespaceNormalization;
         _stringLiteralCharacter = stringLiteralCharacter;
         UseDateType(dateType: dateTypeGeneration);
         UseDateInitializer(dateInitializer: dateInitializerGeneration);

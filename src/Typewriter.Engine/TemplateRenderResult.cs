@@ -9,4 +9,5 @@ internal sealed record TemplateRenderResult(
     string OutputExtension,
     string? OutputDirectory,
     bool? Utf8Bom,
-    bool? GenerateFileHeader);
+    bool? GenerateFileHeader,
+    bool? InsertFinalNewline = null);

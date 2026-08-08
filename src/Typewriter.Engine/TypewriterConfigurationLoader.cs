@@ -118,6 +118,7 @@ public static class TypewriterConfigurationLoader
                 QuoteStyle = loaded.Output?.QuoteStyle ?? current.Output.QuoteStyle,
                 DateLibrary = loaded.Output?.DateLibrary ?? current.Output.DateLibrary,
                 GenerateFileHeader = loaded.Output?.GenerateFileHeader ?? current.Output.GenerateFileHeader,
+                NormalizeWhitespace = loaded.Output?.NormalizeWhitespace ?? current.Output.NormalizeWhitespace,
                 DateType = loaded.Output?.DateType ?? current.Output.DateType,
                 DateInitializer = loaded.Output?.DateInitializer ?? current.Output.DateInitializer,
                 DateOnlyType = loaded.Output?.DateOnlyType ?? current.Output.DateOnlyType,
@@ -296,6 +297,8 @@ public static class TypewriterConfigurationLoader
         public DateLibrary? DateLibrary { get; init; }
 
         public bool? GenerateFileHeader { get; init; }
+
+        public bool? NormalizeWhitespace { get; init; }
 
         public string? DateType { get; init; }
 

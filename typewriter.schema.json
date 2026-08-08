@@ -77,6 +77,16 @@
           "description": "Render nullable types as 'T | null'. Templates can override via settings.DisableStrictNullGeneration().",
           "default": true
         },
+        "generateFileHeader": {
+          "type": "boolean",
+          "description": "Write the Typewriter generated-file header at the top of every generated file. The header also marks files Typewriter owns; disabling it relaxes the refuse-to-overwrite guard for the affected outputs.",
+          "default": true
+        },
+        "normalizeWhitespace": {
+          "type": "boolean",
+          "description": "Post-process rendered output to remove blank lines immediately after an opening brace or immediately before a closing brace. Set to false to emit exactly what the template produced. Templates can override via settings.DisableWhitespaceNormalization().",
+          "default": true
+        },
         "indentStyle": {
           "type": "string",
           "enum": ["preserve", "space", "tab"],

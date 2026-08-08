@@ -17,6 +17,13 @@ public sealed record TypeMetadataReference(
 
     public bool IsValueTuple { get; init; }
 
+    /// <summary>
+    /// Gets a value indicating whether this reference originated from an awaitable
+    /// (<c>Task</c>/<c>ValueTask</c>) type. The reference itself describes the awaited
+    /// result type, matching the pre-4.x code model contract.
+    /// </summary>
+    public bool IsTask { get; init; }
+
     public IReadOnlyList<FieldMetadata> TupleElements { get; init; } = [];
 
     public IReadOnlyList<EnumValueMetadata> EnumValues { get; init; } = [];

@@ -187,6 +187,64 @@ public sealed class ConfigurationDefaultsTests
         overriddenResult.GenerateFileHeader.Should().BeFalse();
     }
 
+    // The whitespace pass drops blank lines adjacent to braces, which silently deletes blank
+    // lines a template deliberately emitted. Both the configuration flag and the template-level
+    // settings.DisableWhitespaceNormalization() must be able to turn it off.
+    [Fact]
+    public void RenderPreservesTemplateBlankLinesWhenWhitespaceNormalizationIsDisabled()
+    {
+        var metadata = CreateNullableEmailMetadata();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = new TemplateDocument(
+            Path: "models.tst",
+            Content: "$Classes[export class $Name {\n\n    x: number;\n}]",
+            OutputPath: "models.ts");
+
+        var normalizedDiagnostics = new List<GenerationDiagnostic>();
+        var normalized = renderer.Render(
+            template: document,
+            metadata: metadata,
+            diagnostics: normalizedDiagnostics,
+            defaults: TemplateRenderDefaults.FromConfiguration(configuration: TypewriterConfiguration.Default));
+
+        var verbatimDiagnostics = new List<GenerationDiagnostic>();
+        var verbatim = renderer.Render(
+            template: document,
+            metadata: metadata,
+            diagnostics: verbatimDiagnostics,
+            defaults: TemplateRenderDefaults.FromConfiguration(configuration: TypewriterConfiguration.Default) with
+            {
+                NormalizeWhitespace = false,
+            });
+
+        normalizedDiagnostics.Should().BeEmpty();
+        verbatimDiagnostics.Should().BeEmpty();
+        normalized.Should().NotContain(unexpected: "{\n\n");
+        verbatim.Should().Contain(expected: "{\n\n");
+    }
+
+    [Fact]
+    public void RenderPreservesTemplateBlankLinesWhenTemplateDisablesWhitespaceNormalization()
+    {
+        var metadata = CreateNullableEmailMetadata();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var diagnostics = new List<GenerationDiagnostic>();
+        var document = TemplateDocument.Parse(
+            template: new TemplateFile(
+                Path: Path.Combine(path1: Path.GetTempPath(), path2: "verbatim.tst"),
+                Content: "${\n    Template(Settings settings)\n    {\n        settings.DisableWhitespaceNormalization();\n    }\n}\n// output: verbatim.ts\n$Classes[export class $Name {\n\n    x: number;\n}]"),
+            diagnostics: diagnostics);
+
+        var output = renderer.Render(
+            template: document,
+            metadata: metadata,
+            diagnostics: diagnostics,
+            defaults: TemplateRenderDefaults.FromConfiguration(configuration: TypewriterConfiguration.Default));
+
+        diagnostics.Should().BeEmpty();
+        output.Should().Contain(expected: "{\n\n");
+    }
+
     [Fact]
     public void RenderUsesConfiguredQuoteStyleForDefaults()
     {

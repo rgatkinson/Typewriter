@@ -781,7 +781,8 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
                 utf8Bom: renderResult.Utf8Bom,
                 generatedFile: out var plannedFile,
                 diagnostic: out var diagnostic,
-                emitHeader: renderResult.GenerateFileHeader ?? request.Configuration.Output.GenerateFileHeader))
+                emitHeader: renderResult.GenerateFileHeader ?? request.Configuration.Output.GenerateFileHeader,
+                insertFinalNewline: renderResult.InsertFinalNewline))
         {
             if (diagnostic is not null)
             {

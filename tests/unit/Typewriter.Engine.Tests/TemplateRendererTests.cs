@@ -7,6 +7,396 @@ namespace Typewriter.Engine.Tests;
 
 public sealed class TemplateRendererTests
 {
+    // A block body conventionally starts on the line after its opening '[' so the emitted text
+    // lines up in the template. That first newline is layout, not content, and must not prepend
+    // a blank line to each rendered item (or to the whole file, for the first item).
+    [Fact]
+    public void RenderDoesNotEmitLeadingBlankLineFromBlockBodyLayout()
+    {
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "AppMessages",
+                    FullName: "Sample.Messaging.AppMessages",
+                    Namespace: "Sample.Messaging",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+
+        const string template = """
+            $Classes[
+            // From $FullName
+            export class $Name {}]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        output.Should().StartWith("// From Sample.Messaging.AppMessages");
+        output.Should().NotStartWith("\n");
+        output.Should().NotStartWith("\r");
+    }
+
+    // Only the first item may drop the block body's layout newline. For every later item that
+    // newline is what separates it from the item before, so stripping it would run the previous
+    // item's closing line straight into the next item's opening line.
+    [Fact]
+    public void RenderKeepsBlockBodyLayoutNewlineBetweenItems()
+    {
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "First",
+                    FullName: "Sample.First",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+                new TypeMetadata(
+                    Name: "Second",
+                    FullName: "Sample.Second",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+
+        const string template = """
+            $Classes[
+            // From $FullName
+            export class $Name {}]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        output.Should().StartWith("// From Sample.First");
+        output.Should().Contain("export class First {}\n// From Sample.Second");
+        output.Should().NotContain("}// From");
+    }
+
+    // The block body's layout newline may only be dropped when the output is already at the start
+    // of a line. When one collection block is followed immediately by another the previous block
+    // leaves the cursor mid-line, so that newline is real content separating the two blocks.
+    [Fact]
+    public void RenderKeepsBlockBodyLayoutNewlineBetweenAdjacentBlocks()
+    {
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "DeviceType",
+                    FullName: "Sample.DeviceType",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Enum,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+                new TypeMetadata(
+                    Name: "Device",
+                    FullName: "Sample.Device",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+
+        const string template = """
+            $Enums[
+            // From $FullName
+            export enum $Name {}]$Classes[
+            // From $FullName
+            export interface $Name {}]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        output.Should().StartWith("// From Sample.DeviceType");
+        output.Should().Contain("export enum DeviceType {}\n// From Sample.Device");
+        output.Should().NotContain("}// From");
+    }
+
+    // Base type metadata is stored as the open generic definition, so walking $BaseClass must
+    // project the definition onto the arguments supplied at the inheritance site. Otherwise an
+    // inherited member declared as TIdentity leaks the type parameter name into generated output
+    // instead of the concrete argument (DeviceId).
+    [Fact]
+    public void RenderSubstitutesGenericArgumentsForInheritedBaseClassProperties()
+    {
+        // A type parameter reference is qualified by its declaring type, matching what the Roslyn
+        // provider emits. Using the bare name here would hide the substitution lookup mismatch.
+        var identityParameter = TypeReference(
+            name: "TIdentity",
+            fullName: "Sample.EntityBaseWithStronglyTypedId.TIdentity",
+            isNullable: false,
+            isPrimitive: false);
+        var deviceIdType = TypeReference(name: "DeviceId", fullName: "Sample.DeviceId", isNullable: false, isPrimitive: false);
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "EntityBaseWithStronglyTypedId",
+                    FullName: "Sample.EntityBaseWithStronglyTypedId",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties:
+                    [
+                        new PropertyMetadata(
+                            Name: "ID",
+                            FullName: "Sample.EntityBaseWithStronglyTypedId.ID",
+                            Type: identityParameter,
+                            Accessibility: MetadataAccessibility.Public,
+                            HasGetter: true,
+                            HasSetter: true,
+                            IsRequired: false,
+                            Attributes: []),
+                    ],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true)
+                {
+                    TypeParameters = [new TypeParameterMetadata(Name: "TIdentity")],
+                },
+                new TypeMetadata(
+                    Name: "DeviceMeta",
+                    FullName: "Sample.DeviceMeta",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes:
+                    [
+                        TypeReference(
+                            name: "EntityBaseWithStronglyTypedId",
+                            fullName: "Sample.EntityBaseWithStronglyTypedId",
+                            isNullable: false,
+                            isPrimitive: false,
+                            typeArguments: [deviceIdType]),
+                    ],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+
+        const string template = """
+            ${
+                using System.Linq;
+
+                string BaseMembers(Class c) => c.BaseClass == null
+                    ? string.Empty
+                    : string.Join(", ", c.BaseClass.Properties.Select(p => p.Name + ": " + p.Type.Name));
+            }$Classes(DeviceMeta)[$BaseMembers]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        output.Should().Contain("ID: DeviceId");
+        output.Should().NotContain("TIdentity");
+    }
+
+    // Inherited methods must project class-level type arguments exactly like properties and
+    // fields, otherwise walking $BaseClass.Methods leaks the open type parameter name into
+    // return and parameter types.
+    [Fact]
+    public void RenderSubstitutesGenericArgumentsForInheritedBaseClassMethods()
+    {
+        var identityParameter = TypeReference(
+            name: "TIdentity",
+            fullName: "Sample.EntityBaseWithStronglyTypedId.TIdentity",
+            isNullable: false,
+            isPrimitive: false);
+        var deviceIdType = TypeReference(name: "DeviceId", fullName: "Sample.DeviceId", isNullable: false, isPrimitive: false);
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "EntityBaseWithStronglyTypedId",
+                    FullName: "Sample.EntityBaseWithStronglyTypedId",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true)
+                {
+                    TypeParameters = [new TypeParameterMetadata(Name: "TIdentity")],
+                    Methods =
+                    [
+                        new MethodMetadata(
+                            Name: "GetId",
+                            FullName: "Sample.EntityBaseWithStronglyTypedId.GetId",
+                            ReturnType: identityParameter,
+                            Accessibility: MetadataAccessibility.Public,
+                            IsStatic: false,
+                            IsAbstract: false,
+                            IsGeneric: false,
+                            Parameters:
+                            [
+                                new ParameterMetadata(
+                                    Name: "fallback",
+                                    FullName: "fallback",
+                                    Type: identityParameter,
+                                    HasDefaultValue: false,
+                                    DefaultValue: null,
+                                    Attributes: [],
+                                    ParentMethodFullName: "Sample.EntityBaseWithStronglyTypedId.GetId"),
+                            ],
+                            Attributes: [],
+                            ParentTypeFullName: "Sample.EntityBaseWithStronglyTypedId"),
+                    ],
+                },
+                new TypeMetadata(
+                    Name: "DeviceMeta",
+                    FullName: "Sample.DeviceMeta",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes:
+                    [
+                        TypeReference(
+                            name: "EntityBaseWithStronglyTypedId",
+                            fullName: "Sample.EntityBaseWithStronglyTypedId",
+                            isNullable: false,
+                            isPrimitive: false,
+                            typeArguments: [deviceIdType]),
+                    ],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+
+        const string template = """
+            ${
+                using System.Linq;
+
+                string BaseMethods(Class c) => c.BaseClass == null
+                    ? string.Empty
+                    : string.Join(", ", c.BaseClass.Methods.Select(m => m.Name + "(" + string.Join(", ", m.Parameters.Select(p => p.Type.Name)) + "): " + m.Type.Name));
+            }$Classes(DeviceMeta)[$BaseMethods]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "models.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        output.Should().Contain("GetId(DeviceId): DeviceId");
+        output.Should().NotContain("TIdentity");
+    }
+
+    // Async methods must present the awaited result as the return type, exactly as the pre-4.x code
+    // model did. Templates reach the payload through TypeArguments[0]; surfacing the Task itself
+    // shifted that index and generated nested wrappers like "Response<IResponse<boolean>Flat>".
+    [Fact]
+    public void RenderExposesAwaitedResultAsMethodReturnTypeForAsyncMethods()
+    {
+        const string ControllerFullName = "Sample.AccountController";
+        const string MethodFullName = "Sample.AccountController.RequestAdminRole";
+        var boolType = TypeReference(name: "Boolean", fullName: "System.Boolean", isNullable: false);
+        var responseType = TypeReference(
+            name: "Response",
+            fullName: "Sample.Response",
+            isNullable: false,
+            isPrimitive: false,
+            typeArguments: [boolType],
+            isTask: true);
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "AccountController",
+                    FullName: ControllerFullName,
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties: [],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true)
+                {
+                    Methods =
+                    [
+                        new MethodMetadata(
+                            Name: "RequestAdminRole",
+                            FullName: MethodFullName,
+                            ReturnType: responseType,
+                            Accessibility: MetadataAccessibility.Public,
+                            IsStatic: false,
+                            IsAbstract: false,
+                            IsGeneric: false,
+                            Parameters: [],
+                            Attributes: [],
+                            ParentTypeFullName: ControllerFullName),
+                    ],
+                },
+            ],
+            Diagnostics: []);
+
+        const string template = "$Classes(AccountController)[$Methods[$Type[$OriginalName|$TypeArguments[$Name]|$IsTask]]]";
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+        var document = TemplateDocument.Parse(template: new TemplateFile(Path: "controllers.tst", Content: template), diagnostics: diagnostics);
+
+        var output = renderer.Render(template: document, metadata: metadata, diagnostics: diagnostics);
+
+        output.Should().Contain("Response|boolean|true");
+    }
+
     [Fact]
     public void RenderExpandsClassesPropertiesAndEnums()
     {
@@ -1880,6 +2270,63 @@ public sealed class TemplateRendererTests
         output.Should().NotContain("IgnoredDto");
     }
 
+    // TimeSpan is date-like at the metadata level, but the legacy template surface exposes
+    // durations only through IsTimeSpan. Templates conventionally test IsDate first, so a
+    // TimeSpan reporting IsDate would be misclassified as a date/time.
+    [Fact]
+    public void RenderKeepsLegacyIsDateAndIsTimeSpanDistinctForDurations()
+    {
+        var metadata = new ProjectMetadata(
+            ProjectPath: "Sample.csproj",
+            SourceFiles: [],
+            Types:
+            [
+                new TypeMetadata(
+                    Name: "AssistRequestSettings",
+                    FullName: "Sample.AssistRequestSettings",
+                    Namespace: "Sample",
+                    Kind: TypeMetadataKind.Class,
+                    Accessibility: MetadataAccessibility.Public,
+                    Properties:
+                    [
+                        new PropertyMetadata(
+                            Name: "ExpiresAfter",
+                            FullName: "Sample.AssistRequestSettings.ExpiresAfter",
+                            Type: TypeReference(name: "TimeSpan", fullName: "System.TimeSpan", isNullable: false, isPrimitive: false, isDateLike: true),
+                            Accessibility: MetadataAccessibility.Public,
+                            HasGetter: true,
+                            HasSetter: false,
+                            IsRequired: false,
+                            Attributes: []),
+                        new PropertyMetadata(
+                            Name: "CreatedAt",
+                            FullName: "Sample.AssistRequestSettings.CreatedAt",
+                            Type: TypeReference(name: "DateTime", fullName: "System.DateTime", isNullable: false, isPrimitive: false, isDateLike: true),
+                            Accessibility: MetadataAccessibility.Public,
+                            HasGetter: true,
+                            HasSetter: true,
+                            IsRequired: false,
+                            Attributes: []),
+                    ],
+                    Attributes: [],
+                    BaseTypes: [],
+                    EnumValues: [],
+                    IsNullableAware: true),
+            ],
+            Diagnostics: []);
+        const string template = """
+            $Classes[dates:$Properties(p => p.Type.IsDate)[$Name;] durations:$Properties(p => p.Type.IsTimeSpan)[$Name;]]
+            """;
+        var diagnostics = new List<GenerationDiagnostic>();
+        var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());
+
+        var output = renderer.Render(template: new TemplateDocument(Path: "models.tst", Content: template, OutputPath: null), metadata: metadata, diagnostics: diagnostics);
+
+        diagnostics.Should().BeEmpty();
+        output.Should().Contain("dates:CreatedAt;");
+        output.Should().Contain("durations:ExpiresAfter;");
+    }
+
     [Fact]
     public void RenderCompilesTemplateCodeBlockHelpers()
     {
@@ -2842,7 +3289,8 @@ public sealed class TemplateRendererTests
         bool isDateLike = false,
         TypeMetadataReference? elementType = null,
         IReadOnlyList<TypeMetadataReference>? typeArguments = null,
-        IReadOnlyList<EnumValueMetadata>? enumValues = null)
+        IReadOnlyList<EnumValueMetadata>? enumValues = null,
+        bool isTask = false)
     {
         return new TypeMetadataReference(
             Name: name,
@@ -2858,6 +3306,7 @@ public sealed class TemplateRendererTests
             TypeArguments: typeArguments ?? [])
         {
             EnumValues = enumValues ?? [],
+            IsTask = isTask,
         };
     }
 

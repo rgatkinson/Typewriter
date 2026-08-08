@@ -226,6 +226,137 @@ internal sealed class TemplateCodeModelAdapterFactory
             : $"{enumName}.{enumValues[index: 0].Name}";
     }
 
+    /// <summary>
+    /// Projects a generic base type definition onto the arguments supplied at the inheritance site.
+    /// </summary>
+    /// <param name="definition">The open generic base type definition taken from the type index.</param>
+    /// <param name="reference">The closed base type reference recorded on the derived type.</param>
+    /// <returns>The definition with member types rewritten in terms of the supplied arguments.</returns>
+    /// <remarks>
+    /// The type index stores open definitions, so a base such as <c>EntityBaseWithStronglyTypedId&lt;TIdentity&gt;</c>
+    /// describes its members in terms of <c>TIdentity</c>. When a derived type inherits from the closed
+    /// <c>EntityBaseWithStronglyTypedId&lt;DeviceId&gt;</c>, walking the base class must report the substituted
+    /// member types, otherwise inherited members leak the open type parameter name into generated output.
+    /// </remarks>
+    private static TypeMetadata SubstituteTypeArguments(
+        TypeMetadata definition,
+        TypeMetadataReference reference)
+    {
+        if (definition.TypeParameters.Count == 0
+            || reference.TypeArguments.Count == 0)
+        {
+            return definition;
+        }
+
+        var substitutions = new Dictionary<string, TypeMetadataReference>(comparer: StringComparer.Ordinal);
+        var count = Math.Min(val1: definition.TypeParameters.Count, val2: reference.TypeArguments.Count);
+        for (var index = 0; index < count; index++)
+        {
+            var argument = reference.TypeArguments[index: index];
+            var parameterName = definition.TypeParameters[index: index].Name;
+
+            // A type parameter reference is named after the parameter, but its full name is
+            // qualified by the declaring type because full names walk the containing type chain.
+            // Both spellings are registered so member types match however they were captured.
+            substitutions[key: parameterName] = argument;
+            substitutions[key: $"{definition.FullName}.{parameterName}"] = argument;
+        }
+
+        return definition with
+        {
+            Properties = definition.Properties
+                .Select(selector: property => property with { Type = SubstituteTypeArguments(type: property.Type, substitutions: substitutions) })
+                .ToArray(),
+            Fields = definition.Fields
+                .Select(selector: field => field with { Type = SubstituteTypeArguments(type: field.Type, substitutions: substitutions) })
+                .ToArray(),
+            Methods = definition.Methods
+                .Select(selector: method => SubstituteTypeArguments(method: method, substitutions: substitutions))
+                .ToArray(),
+        };
+    }
+
+    /// <summary>
+    /// Rewrites a method's return and parameter types, replacing class-level type parameter
+    /// occurrences with their arguments.
+    /// </summary>
+    /// <param name="method">The method to rewrite.</param>
+    /// <param name="substitutions">The type parameter name to argument map.</param>
+    /// <returns>The rewritten method, or the original when nothing was substituted.</returns>
+    private static MethodMetadata SubstituteTypeArguments(
+        MethodMetadata method,
+        IReadOnlyDictionary<string, TypeMetadataReference> substitutions)
+    {
+        // A generic method's own type parameters shadow class-level parameters of the same
+        // name, for example T in "T Clone<T>(T source)" on a class Container<T>: those
+        // occurrences bind to the method and must not be rewritten to the class argument.
+        var effectiveSubstitutions = method.TypeParameters.Count == 0
+            ? substitutions
+            : substitutions
+                .Where(predicate: pair => !method.TypeParameters.Any(predicate: parameter =>
+                    string.Equals(a: parameter.Name, b: pair.Key, comparisonType: StringComparison.Ordinal)))
+                .ToDictionary(keySelector: static pair => pair.Key, elementSelector: static pair => pair.Value, comparer: StringComparer.Ordinal);
+
+        if (effectiveSubstitutions.Count == 0)
+        {
+            return method;
+        }
+
+        return method with
+        {
+            ReturnType = SubstituteTypeArguments(type: method.ReturnType, substitutions: effectiveSubstitutions),
+            Parameters = method.Parameters
+                .Select(selector: parameter => parameter with { Type = SubstituteTypeArguments(type: parameter.Type, substitutions: effectiveSubstitutions) })
+                .ToArray(),
+        };
+    }
+
+    /// <summary>
+    /// Rewrites a type reference, replacing any type parameter occurrences with their arguments.
+    /// </summary>
+    /// <param name="type">The type reference to rewrite.</param>
+    /// <param name="substitutions">The type parameter name to argument map.</param>
+    /// <returns>The rewritten reference, or the original when nothing was substituted.</returns>
+    private static TypeMetadataReference SubstituteTypeArguments(
+        TypeMetadataReference type,
+        IReadOnlyDictionary<string, TypeMetadataReference> substitutions)
+    {
+        // Only a reference that looks like a type parameter may match: it carries no type
+        // arguments or element type of its own, and its simple name participates in the full
+        // name. This keeps a real type that happens to share a parameter's name (for example a
+        // global-namespace class named TIdentity) from being rewritten by the bare-name key.
+        var looksLikeTypeParameter = type.TypeArguments.Count == 0
+            && type.ElementType is null
+            && type.FullName.EndsWith(value: type.Name, comparisonType: StringComparison.Ordinal);
+        if (looksLikeTypeParameter
+            && substitutions.TryGetValue(key: type.FullName, value: out var substituted))
+        {
+            // Preserve nullability declared at the use site, for example TIdentity? stays optional.
+            return type.IsNullable
+                ? substituted with { IsNullable = true }
+                : substituted;
+        }
+
+        var elementType = type.ElementType is null
+            ? null
+            : SubstituteTypeArguments(type: type.ElementType, substitutions: substitutions);
+        var typeArguments = type.TypeArguments
+            .Select(selector: argument => SubstituteTypeArguments(type: argument, substitutions: substitutions))
+            .ToArray();
+
+        if (ReferenceEquals(objA: elementType, objB: type.ElementType)
+            && typeArguments.SequenceEqual(second: type.TypeArguments))
+        {
+            return type;
+        }
+
+        return type with
+        {
+            ElementType = elementType,
+            TypeArguments = typeArguments,
+        };
+    }
+
     private object? AdaptProject(
         ProjectMetadata project,
         System.Type targetType)
@@ -239,39 +370,16 @@ internal sealed class TemplateCodeModelAdapterFactory
             ? project.SourceFiles[index: 0].Path
             : project.ProjectPath;
 
-        var rootTypes = project.Types
-            .Where(predicate: static type => string.IsNullOrWhiteSpace(value: type.ContainingTypeFullName))
-            .ToArray();
-
-        return new CodeFile
+        // The collections are built lazily. Template inspection only reads Settings off the
+        // compiled host, so adapting every type in the merged metadata up front is pure waste
+        // on that path; per-template inspection dominated save latency because of it.
+        return new LazyCodeFile(factory: this, project: project)
         {
             Name = Path.GetFileNameWithoutExtension(path: filePath),
             FileName = Path.GetFileName(path: filePath),
             FileNameWithoutExtension = Path.GetFileNameWithoutExtension(path: filePath),
             FullName = filePath,
             Path = filePath,
-            Classes = new Typewriter.CodeModel.ClassCollection(
-                items: rootTypes
-                    .Where(predicate: type => type.Kind == TypeMetadataKind.Class)
-                    .Select(selector: CreateClass)),
-            Records = new Typewriter.CodeModel.RecordCollection(
-                items: rootTypes
-                    .Where(predicate: type => type.Kind == TypeMetadataKind.Record)
-                    .Select(selector: CreateRecord)),
-            Structs = new Typewriter.CodeModel.StructCollection(
-                items: rootTypes
-                    .Where(predicate: type => type.Kind == TypeMetadataKind.Struct)
-                    .Select(selector: CreateStruct)),
-            Delegates = new Typewriter.CodeModel.DelegateCollection(items: project.Delegates.Select(selector: @delegate => CreateDelegate(@delegate: @delegate, parent: null))),
-            Interfaces = new Typewriter.CodeModel.InterfaceCollection(
-                items: rootTypes
-                    .Where(predicate: type => type.Kind == TypeMetadataKind.Interface)
-                    .Select(selector: CreateInterface)),
-            Enums = new Typewriter.CodeModel.EnumCollection(
-                items: rootTypes
-                    .Where(predicate: type => type.Kind == TypeMetadataKind.Enum)
-                    .Select(selector: CreateEnum)),
-            Types = new Typewriter.CodeModel.TypeCollection(items: rootTypes.Select(selector: CreateType)),
         };
     }
 
@@ -547,7 +655,7 @@ internal sealed class TemplateCodeModelAdapterFactory
                 ? new Typewriter.CodeModel.AttributeCollection()
                 : CreateTypeReferenceAttributes(attributes: typeMetadata.Attributes),
             ElementType = type.ElementType is null ? null : CreateType(type: type.ElementType, runtimeType: runtimeType),
-            IsDate = type.IsDateLike,
+            IsDate = TypeScriptTemporalTypes.IsLegacyDate(isDateLike: type.IsDateLike, fullName: type.FullName),
             IsDictionary = type.IsDictionary,
             IsDynamic = IsDynamic(type: type),
             IsEnum = type.IsEnum,
@@ -557,8 +665,8 @@ internal sealed class TemplateCodeModelAdapterFactory
             IsNullable = type.IsNullable,
             IsPrimitive = IsPrimitiveType(type: type),
             IsStruct = isStruct,
-            IsTask = IsTaskLike(fullName: type.FullName),
-            IsTimeSpan = type.FullName.Equals(value: "System.TimeSpan", comparisonType: StringComparison.Ordinal),
+            IsTask = type.IsTask || IsTaskLike(fullName: type.FullName),
+            IsTimeSpan = TypeScriptTemporalTypes.IsDuration(fullName: type.FullName),
             IsValueTuple = type.IsValueTuple,
             OriginalName = type.Name,
             TupleElements = new Typewriter.CodeModel.FieldCollection(items: type.TupleElements.Select(selector: field => CreateField(field: field, parent: null))),
@@ -1040,7 +1148,7 @@ internal sealed class TemplateCodeModelAdapterFactory
 
         return _typesByFullName.TryGetValue(key: baseType.FullName, value: out var baseMetadata)
             && baseMetadata.Kind == TypeMetadataKind.Class
-                ? CreateClass(type: baseMetadata, reference: baseType)
+                ? CreateClass(type: SubstituteTypeArguments(definition: baseMetadata, reference: baseType), reference: baseType)
                 : new CodeClass
                 {
                     AssemblyName = ResolveAssemblyName(assemblyName: baseType.AssemblyName),
@@ -1063,7 +1171,7 @@ internal sealed class TemplateCodeModelAdapterFactory
 
         return _typesByFullName.TryGetValue(key: baseType.FullName, value: out var baseMetadata)
             && baseMetadata.Kind == TypeMetadataKind.Record
-                ? CreateRecord(type: baseMetadata, reference: baseType)
+                ? CreateRecord(type: SubstituteTypeArguments(definition: baseMetadata, reference: baseType), reference: baseType)
                 : new CodeRecord
                 {
                     AssemblyName = ResolveAssemblyName(assemblyName: baseType.AssemblyName),
@@ -1250,5 +1358,75 @@ internal sealed class TemplateCodeModelAdapterFactory
         return _typesByFullName.TryGetValue(key: type.FullName, value: out var enumMetadata)
             ? ResolveEnumDefault(enumName: type.Name, enumValues: enumMetadata.EnumValues)
             : null;
+    }
+
+    /// <summary>
+    /// A <see cref="CodeFile"/> whose type collections are adapted on first access instead of
+    /// eagerly in <see cref="AdaptProject"/>. Each collection is memoized so repeated template
+    /// access costs nothing extra, and templates that never touch a collection never pay for it.
+    /// </summary>
+    private sealed class LazyCodeFile : CodeFile
+    {
+        private readonly Lazy<Typewriter.CodeModel.IClassCollection> _classes;
+        private readonly Lazy<Typewriter.CodeModel.IDelegateCollection> _delegates;
+        private readonly Lazy<Typewriter.CodeModel.IEnumCollection> _enums;
+        private readonly Lazy<Typewriter.CodeModel.IInterfaceCollection> _interfaces;
+        private readonly Lazy<Typewriter.CodeModel.IRecordCollection> _records;
+        private readonly Lazy<Typewriter.CodeModel.IStructCollection> _structs;
+        private readonly Lazy<Typewriter.CodeModel.ITypeCollection> _types;
+
+        public LazyCodeFile(
+            TemplateCodeModelAdapterFactory factory,
+            ProjectMetadata project)
+        {
+            var rootTypes = new Lazy<TypeMetadata[]>(valueFactory: () => project.Types
+                .Where(predicate: static type => string.IsNullOrWhiteSpace(value: type.ContainingTypeFullName))
+                .ToArray());
+
+            _classes = new Lazy<Typewriter.CodeModel.IClassCollection>(valueFactory: () =>
+                new Typewriter.CodeModel.ClassCollection(
+                    items: rootTypes.Value
+                        .Where(predicate: static type => type.Kind == TypeMetadataKind.Class)
+                        .Select(selector: factory.CreateClass)));
+            _records = new Lazy<Typewriter.CodeModel.IRecordCollection>(valueFactory: () =>
+                new Typewriter.CodeModel.RecordCollection(
+                    items: rootTypes.Value
+                        .Where(predicate: static type => type.Kind == TypeMetadataKind.Record)
+                        .Select(selector: factory.CreateRecord)));
+            _structs = new Lazy<Typewriter.CodeModel.IStructCollection>(valueFactory: () =>
+                new Typewriter.CodeModel.StructCollection(
+                    items: rootTypes.Value
+                        .Where(predicate: static type => type.Kind == TypeMetadataKind.Struct)
+                        .Select(selector: factory.CreateStruct)));
+            _interfaces = new Lazy<Typewriter.CodeModel.IInterfaceCollection>(valueFactory: () =>
+                new Typewriter.CodeModel.InterfaceCollection(
+                    items: rootTypes.Value
+                        .Where(predicate: static type => type.Kind == TypeMetadataKind.Interface)
+                        .Select(selector: factory.CreateInterface)));
+            _enums = new Lazy<Typewriter.CodeModel.IEnumCollection>(valueFactory: () =>
+                new Typewriter.CodeModel.EnumCollection(
+                    items: rootTypes.Value
+                        .Where(predicate: static type => type.Kind == TypeMetadataKind.Enum)
+                        .Select(selector: factory.CreateEnum)));
+            _types = new Lazy<Typewriter.CodeModel.ITypeCollection>(valueFactory: () =>
+                new Typewriter.CodeModel.TypeCollection(items: rootTypes.Value.Select(selector: factory.CreateType)));
+            _delegates = new Lazy<Typewriter.CodeModel.IDelegateCollection>(valueFactory: () =>
+                new Typewriter.CodeModel.DelegateCollection(
+                    items: project.Delegates.Select(selector: @delegate => factory.CreateDelegate(@delegate: @delegate, parent: null))));
+        }
+
+        public override Typewriter.CodeModel.IClassCollection Classes => _classes.Value;
+
+        public override Typewriter.CodeModel.IDelegateCollection Delegates => _delegates.Value;
+
+        public override Typewriter.CodeModel.IEnumCollection Enums => _enums.Value;
+
+        public override Typewriter.CodeModel.IInterfaceCollection Interfaces => _interfaces.Value;
+
+        public override Typewriter.CodeModel.IRecordCollection Records => _records.Value;
+
+        public override Typewriter.CodeModel.IStructCollection Structs => _structs.Value;
+
+        public override Typewriter.CodeModel.ITypeCollection Types => _types.Value;
     }
 }

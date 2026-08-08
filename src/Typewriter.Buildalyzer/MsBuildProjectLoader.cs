@@ -6,7 +6,10 @@ namespace Typewriter.Buildalyzer;
 public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
 {
     private const string CreateSatelliteAssembliesDependsOnPropertyName = "CreateSatelliteAssembliesDependsOn";
-    private const string PrepareForRunDependsOnPropertyName = "PrepareForRunDependsOn";    private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
+    private const string PrepareForRunDependsOnPropertyName = "PrepareForRunDependsOn";
+    private const string RazorLangVersionPropertyName = "RazorLangVersion";
+
+    private static readonly StringComparer PathComparer = StringComparer.OrdinalIgnoreCase;
 
     public Task<ProjectLoadResult> LoadAsync(
         ProjectContext project,
@@ -377,6 +380,17 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
         // not exist" errors in every project that references the affected one.
         environmentOptions.GlobalProperties[key: "StaticWebAssetsEnabled"] = "false";
         environmentOptions.GlobalProperties[key: "GenerateStaticWebAssetsManifest"] = "false";
+
+        // The Razor SDK derives RazorLangVersion from the target framework. During a design-time
+        // build that value can evaluate to empty, and the SDK then fails validation with
+        // "Invalid value '' for RazorLangVersion". Typewriter never consumes Razor output, so pin
+        // the version and skip Razor compilation rather than letting the failure abort the build.
+        // These properties are deliberately applied to every project, not just Razor ones: on a
+        // non-Razor project they are unused and harmless, and there is no reliable way to detect
+        // Razor SDK usage before evaluation.
+        environmentOptions.GlobalProperties[key: RazorLangVersionPropertyName] = "Latest";
+        environmentOptions.GlobalProperties[key: "RazorCompileOnBuild"] = "false";
+        environmentOptions.GlobalProperties[key: "RazorCompileOnPublish"] = "false";
         environmentOptions.EnvironmentVariables[key: "MSBUILDDISABLENODEREUSE"] = "1";
 
         return environmentOptions;

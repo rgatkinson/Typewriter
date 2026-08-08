@@ -338,12 +338,10 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
 
         var typesByFile = symbolMetadata
             .SelectMany(
-                selector: item => item.Symbol.DeclaringSyntaxReferences
-                    .Select(selector: reference => reference.SyntaxTree.FilePath)
-                    .Where(predicate: path => !string.IsNullOrWhiteSpace(value: path))
+                selector: item => GetDeclaringFilePaths(symbol: item.Symbol)
                     .Select(selector: path => new
                     {
-                        Path = Path.GetFullPath(path: path),
+                        Path = path,
                         Type = item.Metadata,
                     }))
             .GroupBy(keySelector: item => item.Path, comparer: StringComparer.OrdinalIgnoreCase)
@@ -353,12 +351,10 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                 comparer: StringComparer.OrdinalIgnoreCase);
         var delegatesByFile = delegateMetadata
             .SelectMany(
-                selector: item => item.Symbol.DeclaringSyntaxReferences
-                    .Select(selector: reference => reference.SyntaxTree.FilePath)
-                    .Where(predicate: path => !string.IsNullOrWhiteSpace(value: path))
+                selector: item => GetDeclaringFilePaths(symbol: item.Symbol)
                     .Select(selector: path => new
                     {
-                        Path = Path.GetFullPath(path: path),
+                        Path = path,
                         Delegate = item.Metadata,
                     }))
             .GroupBy(keySelector: item => item.Path, comparer: StringComparer.OrdinalIgnoreCase)
@@ -489,7 +485,12 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
         ProjectLoadResult loadedProject,
         long validatedVersion)
     {
-        if (result.Metadata.Diagnostics.Any(predicate: diagnostic => diagnostic.Severity == Typewriter.Abstractions.DiagnosticSeverity.Error))
+        // A null compilation means the project could not be loaded or compiled at all, so there is
+        // nothing worth reusing. Semantic errors reported by an otherwise successful compilation are
+        // cached: the metadata is still accurate, and the manifest invalidates the entry as soon as
+        // any input file changes. Discarding those entries forced a full reload of the project (and
+        // its whole reference closure) on every generation whenever the user's code had any error.
+        if (result.Compilation is null)
         {
             return;
         }
@@ -1499,28 +1500,21 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
             };
         }
 
+        // Restore the pre-4.x code model contract: awaitable return types are unwrapped to
+        // their result type so templates navigate `Task<Foo>` as `Foo` while `IsTask` records
+        // that the member was asynchronous.
+        if (symbol is INamedTypeSymbol taskType && IsAwaitableTaskType(symbol: taskType))
+        {
+            return CreateTaskResultTypeReference(symbol: taskType, visitedSymbols: visitedSymbols);
+        }
+
         var elementType = GetElementType(symbol: symbol, visitedSymbols: visitedSymbols);
         var isDictionary = IsDictionary(symbol: symbol);
-        var typeArguments = symbol is INamedTypeSymbol genericType
-            ? genericType.TypeArguments
-                .Zip(
-                    second: genericType.TypeArgumentNullableAnnotations,
-                    resultSelector: (argument, annotation) => CreateTypeReference(
-                        symbol: argument,
-                        nullableAnnotation: annotation,
-                        visitedSymbols: visitedSymbols))
-                .ToArray()
-            : [];
-
-        // A type can be a dictionary through inheritance (for example
-        // "class Messages : Dictionary<string, Message>"). Such a type declares no type
-        // arguments of its own, so surface the key/value arguments of the implemented
-        // dictionary interface instead; templates rely on TypeArguments[0]/[1] being present
-        // whenever IsDictionary is true.
-        if (isDictionary && typeArguments.Length != 2)
-        {
-            typeArguments = GetDictionaryTypeArguments(symbol: symbol, visitedSymbols: visitedSymbols) ?? typeArguments;
-        }
+        var typeArguments = GetTypeArguments(
+            symbol: symbol,
+            elementType: elementType,
+            isDictionary: isDictionary,
+            visitedSymbols: visitedSymbols);
 
         return new TypeMetadataReference(
             Name: GetDisplayName(symbol: symbol),
@@ -1566,6 +1560,55 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                 ? GetEnumValues(symbol: enumType).ToArray()
                 : [],
         };
+
+    /// <summary>
+    /// Builds the generic type arguments surfaced to templates for a type reference.
+    /// </summary>
+    /// <param name="symbol">The type symbol being described.</param>
+    /// <param name="elementType">The collection element type, when the symbol is a collection.</param>
+    /// <param name="isDictionary">Whether the symbol was classified as a dictionary.</param>
+    /// <param name="visitedSymbols">Recursion guard for cyclic type graphs.</param>
+    /// <returns>The type arguments to surface on the resulting reference.</returns>
+    /// <remarks>
+    /// Two shapes need normalizing beyond the symbol's own declared arguments. A type can be a
+    /// dictionary through inheritance (for example "class Messages : Dictionary&lt;string, Message&gt;")
+    /// and declares no arguments of its own, so the key/value pair is taken from the implemented
+    /// dictionary interface. Arrays are <see cref="IArrayTypeSymbol"/> rather than
+    /// <see cref="INamedTypeSymbol"/> and likewise declare none; legacy templates read a
+    /// collection's element through <c>TypeArguments[0]</c> and fall back to the collection type
+    /// itself when it is empty, which for an array yields a name already ending in "[]" and
+    /// produces malformed identifiers such as "IOrganization[]Flat". Surfacing the element type
+    /// makes arrays behave like <c>List&lt;T&gt;</c> for those templates.
+    /// </remarks>
+    private static TypeMetadataReference[] GetTypeArguments(
+        ITypeSymbol symbol,
+        TypeMetadataReference? elementType,
+        bool isDictionary,
+        ISet<ITypeSymbol> visitedSymbols)
+    {
+        var typeArguments = symbol is INamedTypeSymbol genericType
+            ? genericType.TypeArguments
+                .Zip(
+                    second: genericType.TypeArgumentNullableAnnotations,
+                    resultSelector: (argument, annotation) => CreateTypeReference(
+                        symbol: argument,
+                        nullableAnnotation: annotation,
+                        visitedSymbols: visitedSymbols))
+                .ToArray()
+            : [];
+
+        if (isDictionary && typeArguments.Length != 2)
+        {
+            typeArguments = GetDictionaryTypeArguments(symbol: symbol, visitedSymbols: visitedSymbols) ?? typeArguments;
+        }
+
+        if (typeArguments.Length == 0 && elementType is not null)
+        {
+            typeArguments = [elementType];
+        }
+
+        return typeArguments;
+    }
 
     private static TypeMetadataReference? GetElementType(
         ITypeSymbol symbol,
@@ -1731,6 +1774,63 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
     {
         return GetFullName(symbol: symbol.OriginalDefinition)
             .Equals(value: "System.Nullable", comparisonType: StringComparison.Ordinal);
+    }
+
+    private static bool IsAwaitableTaskType(INamedTypeSymbol symbol)
+    {
+        var fullName = GetFullName(symbol: symbol.OriginalDefinition);
+        return fullName.Equals(value: "System.Threading.Tasks.Task", comparisonType: StringComparison.Ordinal)
+            || fullName.Equals(value: "System.Threading.Tasks.ValueTask", comparisonType: StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Builds the result type surfaced for a non-generic <c>Task</c>/<c>ValueTask</c>, mirroring
+    /// the pre-4.x void task metadata.
+    /// </summary>
+    private static TypeMetadataReference CreateVoidTaskTypeReference() =>
+        new(
+            Name: "void",
+            FullName: "System.Void",
+            Namespace: nameof(System),
+            IsNullable: false,
+            IsCollection: false,
+            IsDictionary: false,
+            IsEnum: false,
+            IsPrimitive: true,
+            IsDateLike: false,
+            ElementType: null,
+            TypeArguments: [])
+        {
+            IsTask = true,
+        };
+
+    /// <summary>
+    /// Unwraps an awaitable type to the reference describing its awaited result, flagging the
+    /// result as task-originated.
+    /// </summary>
+    /// <param name="symbol">The awaitable type symbol being unwrapped.</param>
+    /// <param name="visitedSymbols">The symbols already being expanded, used for cycle detection.</param>
+    /// <returns>The awaited result type reference with <see cref="TypeMetadataReference.IsTask"/> set.</returns>
+    private static TypeMetadataReference CreateTaskResultTypeReference(
+        INamedTypeSymbol symbol,
+        ISet<ITypeSymbol> visitedSymbols)
+    {
+        if (symbol.TypeArguments.Length != 1)
+        {
+            return CreateVoidTaskTypeReference();
+        }
+
+        var resultAnnotation = symbol.TypeArgumentNullableAnnotations.Length > 0
+            ? symbol.TypeArgumentNullableAnnotations[index: 0]
+            : NullableAnnotation.None;
+        var result = CreateTypeReference(
+            symbol: symbol.TypeArguments[index: 0],
+            nullableAnnotation: resultAnnotation,
+            visitedSymbols: visitedSymbols);
+        return result with
+        {
+            IsTask = true,
+        };
     }
 
     private static bool IsNullableAware(
@@ -1969,6 +2069,42 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
         return parts.Length == 0
             ? null
             : string.Join(separator: ' ', value: parts);
+    }
+
+    /// <summary>
+    /// Returns the source file a symbol should be attributed to when metadata is grouped per file.
+    /// A partial type declares itself in several files, but it is still a single type: attributing it
+    /// to every declaring file would make per-source-file rendering emit the same type once per part.
+    /// The part whose file name best matches the type name is preferred, falling back to the first
+    /// declaration in a stable ordering so results are deterministic across runs.
+    /// </summary>
+    /// <param name="symbol">The declared symbol to attribute.</param>
+    /// <returns>A single full source path, or an empty sequence when the symbol has no source location.</returns>
+    private static IEnumerable<string> GetDeclaringFilePaths(ISymbol symbol)
+    {
+        var paths = symbol.DeclaringSyntaxReferences
+            .Select(selector: reference => reference.SyntaxTree.FilePath)
+            .Where(predicate: path => !string.IsNullOrWhiteSpace(value: path))
+            .Select(selector: path => Path.GetFullPath(path: path))
+            .Distinct(comparer: StringComparer.OrdinalIgnoreCase)
+            .OrderBy(keySelector: path => path, comparer: StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (paths.Length <= 1)
+        {
+            return paths;
+        }
+
+        // symbol.Name is the simple name without generic arity, so a partial Foo<T> declared in
+        // Foo.cs still matches its preferred file.
+        var preferred = Array.Find(
+            array: paths,
+            match: path => string.Equals(
+                a: Path.GetFileNameWithoutExtension(path: path),
+                b: symbol.Name,
+                comparisonType: StringComparison.OrdinalIgnoreCase));
+
+        return [preferred ?? paths[0]];
     }
 
     private static string TrimAttributeSuffix(string name)
