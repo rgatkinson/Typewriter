@@ -1,4 +1,4 @@
 [submodule "Buildalyzer"]
 	path = Buildalyzer
-	url = https://github.com/AdaskoTheBeAsT/Buildalyzer.git
+	url = https://github.com/rgatkinson/Buildalyzer.git
 	branch = feature/typewriter-v2
