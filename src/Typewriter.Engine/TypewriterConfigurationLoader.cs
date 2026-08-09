@@ -137,6 +137,7 @@ public static class TypewriterConfigurationLoader
             Generation = current.Generation with
             {
                 Incremental = NormalizeIncremental(incremental: loaded.Generation?.Incremental) ?? current.Generation.Incremental,
+                RunSourceGenerators = loaded.Generation?.RunSourceGenerators ?? current.Generation.RunSourceGenerators,
             },
         };
     }
@@ -329,5 +330,7 @@ public static class TypewriterConfigurationLoader
     internal sealed record GenerationConfigurationFile
     {
         public string? Incremental { get; init; }
+
+        public bool? RunSourceGenerators { get; init; }
     }
 }

@@ -195,6 +195,11 @@
           "enum": ["auto", "off"],
           "description": "Incremental generation. With 'auto', watch and IDE generate-on-save runs that only changed C# source files re-render only the affected outputs. 'off' always performs a full generation.",
           "default": "auto"
+        },
+        "runSourceGenerators": {
+          "type": "boolean",
+          "description": "Whether source generators run while building project metadata. Generated types are not visible to templates, so disabling this is safe for most workspaces, but it can change how hand-written code that references generated symbols is resolved.",
+          "default": true
         }
       }
     }

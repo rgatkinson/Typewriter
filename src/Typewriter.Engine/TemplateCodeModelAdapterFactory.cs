@@ -27,6 +27,73 @@ internal sealed class TemplateCodeModelAdapterFactory
     private readonly IReadOnlyDictionary<string, PropertyMetadata> _propertiesByFullName;
     private readonly IReadOnlyDictionary<string, TypeMetadata> _typesByFullName;
     private readonly TypeScriptTypeMapper _typeMapper = new();
+
+    // PERFORMANCE: significant on the warm render path. Re-measure before removing.
+    //
+    // These caches are not a speculative micro-optimisation -- they were added in response to a CPU
+    // profile of a real workload (the Anavasi solution, 146 generated files) and are worth roughly
+    // a 7x reduction in *warm* render time:
+    //
+    //     before caching:  2.368 s   (+/- 0.057 s, 15 iterations)
+    //     after caching:   0.318 s   (+/- 0.010 s, 15 iterations)
+    //
+    // READ THIS BEFORE TRUSTING THE NUMBERS ABOVE. Those figures come from BenchmarkDotNet, and
+    // BenchmarkDotNet only ever measures the warm path here: CSharpProjectMetadataProvider holds
+    // static caches, so by the second iteration the workload is warm in ways a freshly started CLI
+    // process never is. The 7x is real for that path, but it did NOT move end-to-end wall clock:
+    //
+    //     RegenAnavasi.ps1 before caching:  ~54 s
+    //     RegenAnavasi.ps1 after caching:   ~53 s
+    //
+    // Measured phase split of a cold CLI run (~52 s): ~28 s workspace/metadata load, ~23 s
+    // per-template work, <1 s template compilation, ~0.1 s process startup. The ~23 s of cold
+    // per-template work is the same logical operation the benchmark reports as 318 ms -- a ~70x
+    // gap. Whatever dominates that cold path is therefore NOT the redundant adapter construction
+    // these caches eliminate.
+    //
+    // The lesson, and the reason this comment is long: a large warm-path win can be worth nothing
+    // end to end. Validate against a real cold run before claiming a script-level improvement.
+    //
+    // The cost being avoided is nonetheless real. Rendering adapts the same metadata objects over
+    // and over for two independent reasons:
+    //
+    //   1. CompiledTemplateHelper.TryInvoke probes each *candidate overload* of a template method
+    //      and calls TryAdapt once per candidate, so a single template call site can adapt the same
+    //      metadata several times before a match is found.
+    //   2. Templates naturally revisit the same types through properties, base classes, interfaces,
+    //      and type arguments.
+    //
+    // Without memoisation each of those hits rebuilds an entire object graph from scratch --
+    // CreateClass eagerly materialises every constant, delegate, event, field, method, property,
+    // static readonly field, and all five nested-type collections. The profile showed the
+    // reference-taking CreateType overload at 41% of render CPU and the Type constructor at ~15%
+    // self CPU; after caching, both dropped out of the hot path entirely.
+    //
+    // Correctness notes:
+    //   - Both factories are pure functions of their inputs once _settings is fixed, and one factory
+    //     instance exists per render, so a per-instance cache cannot leak state across renders or
+    //     across differing settings.
+    //   - Reference identity is the correct key: the metadata objects are interned by
+    //     ProjectMetadataIndex for the lifetime of a render, and structural equality would be both
+    //     slower and wrong (two structurally identical references can carry different declaration
+    //     context).
+    //   - Note which overloads are deliberately NOT cached; see CreateClass and CreateType below.
+    //
+    // THREADING: these are plain Dictionary instances, which is only safe because rendering is
+    // single-threaded per factory instance. One factory is created per compiled template
+    // (TemplateRuntimeCompiler.CreateHelper) and the generator renders source files sequentially --
+    // there is no Parallel.* or Task.WhenAll on the render path. If rendering is ever parallelised,
+    // these become data races: switch to ConcurrentDictionary (or give each render its own factory)
+    // at that point rather than assuming the dictionaries are safe.
+    private readonly Dictionary<(TypeMetadataReference Reference, FrontendRuntimeTypeKind RuntimeType), CodeType> _typeByReference = new(comparer: TypeReferenceKeyComparer.Instance);
+    private readonly Dictionary<TypeMetadata, CodeClass> _classByMetadata = new(comparer: ReferenceEqualityComparer.Instance);
+
+    // Unlike the two caches above, this one measured as a wash (329 ms -> 318 ms, inside the noise
+    // band). It is retained because it is correct and effectively free, and it guards against
+    // redundant construction on templates whose shape differs from the workload profiled above --
+    // but do not expect it to show up in a benchmark, and do not treat its presence as evidence
+    // that declaration-path construction is a bottleneck.
+    private readonly Dictionary<TypeMetadata, CodeType> _typeByMetadata = new(comparer: ReferenceEqualityComparer.Instance);
     private CodeFile? _cachedFile;
     private ProjectMetadata? _cachedFileProject;
 
@@ -419,9 +486,25 @@ internal sealed class TemplateCodeModelAdapterFactory
 
     private CodeClass CreateClass(TypeMetadata type)
     {
-        return CreateClass(type: type, reference: null);
+        // Hot on the warm render path. This method eagerly materialises the type's entire member
+        // graph, and before memoisation it was being re-run for the same type dozens of times per
+        // render (see the cache field comments for the measured 7x warm-path impact, and for why
+        // that did not translate into an end-to-end win). Keep the cache.
+        if (_classByMetadata.TryGetValue(key: type, value: out var cached))
+        {
+            return cached;
+        }
+
+        var created = CreateClass(type: type, reference: null);
+        _classByMetadata[type] = created;
+        return created;
     }
 
+    // Deliberately NOT cached. This overload projects the class through a specific reference, so the
+    // resulting Type differs per reference even for the same declaration. Sharing one instance
+    // across references would silently reintroduce the declaration-vs-reference bug class that
+    // DeclarationVersusReferenceTests and DeclaredTypeMemberParityTests exist to prevent.
+    // Correctness wins over the marginal gain here.
     private CodeClass CreateClass(
         TypeMetadata type,
         TypeMetadataReference? reference)
@@ -638,6 +721,48 @@ internal sealed class TemplateCodeModelAdapterFactory
 
     private CodeType CreateType(TypeMetadata type)
     {
+        // Measured as a wash on the profiled workload, unlike the reference overload below which is
+        // a major win. Retained as cheap insurance against templates with different access patterns.
+        if (_typeByMetadata.TryGetValue(key: type, value: out var cached))
+        {
+            return cached;
+        }
+
+        var created = CreateTypeCore(type: type);
+
+        // Populated after construction for the same reason as the reference overload: the member
+        // factories below reach back through ContainingClass and nested types, so an entry published
+        // early could be observed half-built.
+        _typeByMetadata[type] = created;
+        return created;
+    }
+
+    private CodeType CreateType(
+        TypeMetadataReference type,
+        FrontendRuntimeTypeKind runtimeType = FrontendRuntimeTypeKind.Auto)
+    {
+        // Hottest path in warm template rendering: this was 41% of render CPU before memoisation,
+        // the single largest contributor in the profile. Do not remove this cache without
+        // re-running the benchmark -- see the cache field comments for the measured numbers and
+        // for why the benchmark overstates the end-to-end benefit.
+        var cacheKey = (Reference: type, RuntimeType: runtimeType);
+        if (_typeByReference.TryGetValue(key: cacheKey, value: out var cached))
+        {
+            return cached;
+        }
+
+        var created = CreateTypeCore(type: type, runtimeType: runtimeType);
+
+        // Assigned after construction rather than before: CreateTypeCore recurses through element
+        // types and type arguments, and a self-referential type would otherwise observe a partially
+        // built entry. Recursion here terminates on structure (arguments are strictly smaller), so
+        // the worst case is that a nested type is built twice before the entry lands.
+        _typeByReference[cacheKey] = created;
+        return created;
+    }
+
+    private CodeType CreateTypeCore(TypeMetadata type)
+    {
         // The declaration path invokes the shared factories immediately. Unlike the reference path
         // there is no construction cycle to break here, so there is nothing to defer.
         var members = CreateDeclaredTypeMembers(
@@ -680,9 +805,9 @@ internal sealed class TemplateCodeModelAdapterFactory
         };
     }
 
-    private CodeType CreateType(
+    private CodeType CreateTypeCore(
         TypeMetadataReference type,
-        FrontendRuntimeTypeKind runtimeType = FrontendRuntimeTypeKind.Auto)
+        FrontendRuntimeTypeKind runtimeType)
     {
         var typeArguments = new Typewriter.CodeModel.TypeCollection(
             items: type.TypeArguments.Select(selector: argument => CreateType(type: argument, runtimeType: runtimeType)));
@@ -1494,5 +1619,27 @@ internal sealed class TemplateCodeModelAdapterFactory
         public override Typewriter.CodeModel.IStructCollection Structs => _structs.Value;
 
         public override Typewriter.CodeModel.ITypeCollection Types => _types.Value;
+    }
+
+    // Compares only the reference identity of the metadata object plus the runtime-type
+    // discriminator. Structural equality would be both slower and wrong here, since two
+    // structurally identical references can still carry different declaration context.
+    private sealed class TypeReferenceKeyComparer : IEqualityComparer<(TypeMetadataReference Reference, FrontendRuntimeTypeKind RuntimeType)>
+    {
+        public static readonly TypeReferenceKeyComparer Instance = new();
+
+        public bool Equals(
+            (TypeMetadataReference Reference, FrontendRuntimeTypeKind RuntimeType) x,
+            (TypeMetadataReference Reference, FrontendRuntimeTypeKind RuntimeType) y)
+        {
+            return ReferenceEquals(objA: x.Reference, objB: y.Reference) && x.RuntimeType == y.RuntimeType;
+        }
+
+        public int GetHashCode((TypeMetadataReference Reference, FrontendRuntimeTypeKind RuntimeType) obj)
+        {
+            return HashCode.Combine(
+                value1: System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o: obj.Reference),
+                value2: (int)obj.RuntimeType);
+        }
     }
 }

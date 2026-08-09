@@ -107,7 +107,8 @@ internal static class CliCommandLine
             Option<bool> failOnWarning,
             Option<bool> allProjects,
             Option<bool> diff,
-            Option<string[]> changed)
+            Option<string[]> changed,
+            Option<bool> noSourceGenerators)
 #pragma warning restore S107
         {
             Workspace = workspace;
@@ -121,6 +122,7 @@ internal static class CliCommandLine
             AllProjects = allProjects;
             Diff = diff;
             Changed = changed;
+            NoSourceGenerators = noSourceGenerators;
         }
 
         private Option<string?> Workspace { get; }
@@ -144,6 +146,8 @@ internal static class CliCommandLine
         private Option<bool> Diff { get; }
 
         private Option<string[]> Changed { get; }
+
+        private Option<bool> NoSourceGenerators { get; }
 
         public static CliOptionSet Create()
         {
@@ -195,6 +199,10 @@ internal static class CliCommandLine
                 changed: new Option<string[]>(name: "--changed")
                 {
                     Description = "Path of an input file changed since the previous generation. May be repeated. When every changed input is a C# source file, only the affected outputs are re-rendered.",
+                },
+                noSourceGenerators: new Option<bool>(name: "--no-source-generators")
+                {
+                    Description = "Skip running C# source generators when loading project metadata. Speeds up generation when templates do not depend on generated types.",
                 });
         }
 
@@ -211,6 +219,7 @@ internal static class CliCommandLine
             command.Options.Add(item: AllProjects);
             command.Options.Add(item: Diff);
             command.Options.Add(item: Changed);
+            command.Options.Add(item: NoSourceGenerators);
         }
 
         public CliOptions CreateOptions(
@@ -229,7 +238,8 @@ internal static class CliCommandLine
                 AllProjects: parseResult.GetValue(option: AllProjects),
                 Diff: parseResult.GetValue(option: Diff),
                 Force: false,
-                Help: false)
+                Help: false,
+                NoSourceGenerators: parseResult.GetValue(option: NoSourceGenerators))
             {
                 ChangedPaths = parseResult.GetValue(option: Changed) ?? [],
             };

@@ -321,6 +321,10 @@ internal static class TypewriterCli
             {
                 FailOnWarning = options.FailOnWarning || configuration.Diagnostics.FailOnWarning,
             },
+            Generation = configuration.Generation with
+            {
+                RunSourceGenerators = configuration.Generation.RunSourceGenerators && !options.NoSourceGenerators,
+            },
         };
     }
 

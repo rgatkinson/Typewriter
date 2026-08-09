@@ -17,6 +17,8 @@ public static class MetadataCacheMetrics
     private static long _fullLoads;
     private static long _parsedSourceFiles;
     private static long _reusedSyntaxTrees;
+    private static double _msBuildLoadMilliseconds;
+    private static double _roslynMetadataMilliseconds;
     private static string? _lastInvalidationReason;
 
     public static long CacheHits
@@ -178,13 +180,44 @@ public static class MetadataCacheMetrics
         }
     }
 
+    /// <summary>
+    /// Records time spent in MSBuild project evaluation. This phase dominates cold metadata loads,
+    /// so it is tracked separately from the Roslyn work that follows it.
+    /// </summary>
+    /// <remarks>
+    /// The value is a sum of per-project wall-clock waits, not elapsed wall clock. Loads overlap
+    /// when the parallel prefetch loader is active, and a wait that is served from its cache still
+    /// counts here, so the reported total can exceed the real elapsed time of the phase. Use it to
+    /// compare runs and attribute relative cost, not as an absolute wall-clock measurement.
+    /// </remarks>
+    /// <param name="elapsed">Time spent loading one project through MSBuild.</param>
+    public static void RecordMsBuildLoad(TimeSpan elapsed)
+    {
+        lock (Sync)
+        {
+            _msBuildLoadMilliseconds += elapsed.TotalMilliseconds;
+        }
+    }
+
+    /// <summary>
+    /// Records time spent parsing sources and building the Roslyn compilation for one project.
+    /// </summary>
+    /// <param name="elapsed">Time spent creating one project's Roslyn metadata.</param>
+    public static void RecordRoslynMetadata(TimeSpan elapsed)
+    {
+        lock (Sync)
+        {
+            _roslynMetadataMilliseconds += elapsed.TotalMilliseconds;
+        }
+    }
+
     public static string CreateSummary()
     {
         lock (Sync)
         {
             return string.Create(
                 provider: CultureInfo.InvariantCulture,
-                handler: $"hits={_cacheHits} (stat={_statValidatedHits}, dirty={_dirtyValidatedHits}), misses={_cacheMisses}, source-only-rebuilds={_sourceOnlyRebuilds}, full-loads={_fullLoads}, parsed-files={_parsedSourceFiles}, reused-trees={_reusedSyntaxTrees}, last-invalidation={_lastInvalidationReason ?? "none"}");
+                handler: $"hits={_cacheHits} (stat={_statValidatedHits}, dirty={_dirtyValidatedHits}), misses={_cacheMisses}, source-only-rebuilds={_sourceOnlyRebuilds}, full-loads={_fullLoads}, parsed-files={_parsedSourceFiles}, reused-trees={_reusedSyntaxTrees}, msbuild-load={_msBuildLoadMilliseconds:F1} ms, roslyn-metadata={_roslynMetadataMilliseconds:F1} ms, last-invalidation={_lastInvalidationReason ?? "none"}");
         }
     }
 
@@ -200,6 +233,8 @@ public static class MetadataCacheMetrics
             _fullLoads = 0;
             _parsedSourceFiles = 0;
             _reusedSyntaxTrees = 0;
+            _msBuildLoadMilliseconds = 0;
+            _roslynMetadataMilliseconds = 0;
             _lastInvalidationReason = null;
         }
     }

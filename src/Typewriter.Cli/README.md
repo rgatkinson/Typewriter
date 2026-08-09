@@ -74,6 +74,51 @@ typewriter generate --project ./src/MyApi/MyApi.csproj --template ./templates/co
 typewriter watch --workspace . --all-projects
 ```
 
+## ⚡ Speeding up large workspaces
+
+Metadata loading dominates generation time on multi-project solutions. If your templates do not
+reference types produced by source generators, you can skip generator execution in
+`typewriter.json`:
+
+```json
+{
+  "generation": {
+    "runSourceGenerators": false
+  }
+}
+```
+
+This is a workspace setting, so it applies everywhere Typewriter generates — the CLI,
+`typewriter watch`, and the Visual Studio extension's **Render Template** and
+**Render All Templates** commands alike.
+
+For one-off runs, or for workspaces without a `typewriter.json`, the same behaviour is available
+as a CLI switch:
+
+```bash
+typewriter generate --workspace . --project Web/Web.csproj --template Templates --no-source-generators
+```
+
+The switch only ever disables generators: it turns them off when configuration leaves them
+enabled, and never re-enables them when `runSourceGenerators` is `false`. There is deliberately no
+opposite switch — to re-enable generators for a single run, set `"runSourceGenerators": true` in
+`typewriter.json` (or remove the setting, since `true` is the default) and omit
+`--no-source-generators`.
+
+On a 9-project reference workspace this reduced end-to-end generation from ~19.3 s to ~15.0 s
+(-22%) with byte-identical output.
+
+**When this is safe.** Generated types are never template entities: Typewriter enumerates only the
+syntax trees parsed from disk, so a source-generated class never becomes a template `Class`.
+Disabling generators is therefore safe when your hand-written, template-visible code does not
+*reference* generated symbols.
+
+**When it is not.** Generators still affect semantic resolution of hand-written code. If a property
+you emit is typed by a generated type, or a partial method/regex/DTO generator contributes members
+your templates read, disabling generators can silently change or drop output rather than fail
+loudly. The default stays `true` for this reason — treat this as an opt-in you verify by diffing
+generated output before and after.
+
 ## ✅ Best fit
 
 Use the CLI when you want repeatable TypeScript generation in local scripts, build steps, pull request checks, or any environment where an IDE should not be required.

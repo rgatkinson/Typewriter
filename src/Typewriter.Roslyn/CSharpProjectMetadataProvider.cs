@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -28,7 +29,7 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
     private readonly IProjectWorkspaceLoader _projectLoader;
 
     public CSharpProjectMetadataProvider()
-        : this(projectLoader: new MsBuildProjectLoader())
+        : this(projectLoader: new ParallelPrefetchProjectWorkspaceLoader(inner: new MsBuildProjectLoader()))
     {
     }
 
@@ -58,6 +59,16 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
             loadedProjects: loadedProjects,
             loadingProjects: loadingProjects,
             cancellationToken: cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task PrefetchAsync(
+        IReadOnlyList<ProjectContext> projects,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(argument: projects);
+
+        return _projectLoader.PrefetchAsync(projects: projects, cancellationToken: cancellationToken);
     }
 
     /// <summary>
@@ -136,7 +147,8 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
             ProjectPath: projectPath,
             WorkspacePath: Path.GetFullPath(path: project.WorkspacePath),
             TargetFramework: project.TargetFramework ?? string.Empty,
-            RunFullDiagnostics: project.RunFullDiagnostics);
+            RunFullDiagnostics: project.RunFullDiagnostics,
+            SourceGeneratorsEnabled: project.RunSourceGenerators);
         var cacheLookup = LookupCache(cacheKey: metadataCacheKey);
         if (cacheLookup.Outcome == CacheLookupOutcome.Hit)
         {
@@ -173,7 +185,9 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                     loadingProjects: loadingProjects);
             }
 
+            var loadStopwatch = Stopwatch.StartNew();
             loadedProject = await projectLoader.LoadAsync(project: project, cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
+            MetadataCacheMetrics.RecordMsBuildLoad(elapsed: loadStopwatch.Elapsed);
             MetadataCacheMetrics.RecordFullLoad();
         }
 
@@ -199,7 +213,8 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
                     project: new ProjectContext(
                         ProjectPath: projectReference,
                         WorkspacePath: project.WorkspacePath,
-                        TargetFramework: project.TargetFramework ?? loadedProject.TargetFramework),
+                        TargetFramework: project.TargetFramework ?? loadedProject.TargetFramework,
+                        RunSourceGenerators: project.RunSourceGenerators),
                     loadedProjects: loadedProjects,
                     loadingProjects: loadingProjects,
                     cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false));
@@ -213,12 +228,15 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
             .Select(selector: group => group.First())
             .Select(selector: reference => reference.Compilation.ToMetadataReference())
             .ToArray();
+        var currentStopwatch = Stopwatch.StartNew();
         var currentProject = await CreateCurrentProjectMetadataAsync(
             projectPath: projectPath,
             loadedProject: loadedProject,
             projectReferences: projectReferences,
             runFullDiagnostics: project.RunFullDiagnostics,
+            runSourceGenerators: project.RunSourceGenerators,
             cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
+        MetadataCacheMetrics.RecordRoslynMetadata(elapsed: currentStopwatch.Elapsed);
         var result = new ProjectMetadataBuildResult(
             Metadata: MergeProjectMetadata(
                 project: currentProject.Metadata,
@@ -242,6 +260,7 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
         ProjectLoadResult loadedProject,
         IReadOnlyList<MetadataReference> projectReferences,
         bool runFullDiagnostics,
+        bool runSourceGenerators,
         CancellationToken cancellationToken)
 #pragma warning restore MA0051 // Method is too long
     {
@@ -302,8 +321,10 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
             compilation: compilation,
             loadedProject: loadedProject,
             parseOptions: parseOptions,
+            runSourceGenerators: runSourceGenerators,
             cancellationToken: cancellationToken,
             diagnostics: out var generatorDiagnostics);
+
         var diagnostics = GetCompilationDiagnostics(
                 compilation: compilation,
                 generatorDiagnostics: generatorDiagnostics,
@@ -703,9 +724,18 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
         CSharpCompilation compilation,
         ProjectLoadResult loadedProject,
         CSharpParseOptions parseOptions,
+        bool runSourceGenerators,
         CancellationToken cancellationToken,
         out ImmutableArray<Diagnostic> diagnostics)
     {
+        // Bail out before loading analyzer assemblies: discovering and instantiating generators is
+        // itself a measurable cost, so the check has to precede AnalyzerAssemblyLoader.
+        if (!runSourceGenerators)
+        {
+            diagnostics = [];
+            return compilation;
+        }
+
         using var loader = new AnalyzerAssemblyLoader();
         var generators = CreateSourceGenerators(analyzerReferences: loadedProject.AnalyzerReferences, loader: loader).ToArray();
         if (generators.Length == 0)
@@ -2158,7 +2188,8 @@ public sealed class CSharpProjectMetadataProvider : IProjectMetadataProvider
         string ProjectPath,
         string WorkspacePath,
         string TargetFramework,
-        bool RunFullDiagnostics);
+        bool RunFullDiagnostics,
+        bool SourceGeneratorsEnabled);
 
     private sealed record CacheLookupResult(
         CacheLookupOutcome Outcome,

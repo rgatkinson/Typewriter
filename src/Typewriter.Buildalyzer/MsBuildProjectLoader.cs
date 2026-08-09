@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Build.Framework;
 using Typewriter.Abstractions;
 
@@ -37,7 +38,9 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
         try
         {
             var workspacePath = Path.GetFullPath(path: project.WorkspacePath);
+            var managerWatch = Stopwatch.StartNew();
             var manager = CreateAnalyzerManager(workspacePath: workspacePath);
+            LoadProbe.ReportTiming(stage: "manager-create", name: Path.GetFileNameWithoutExtension(path: projectPath), elapsed: managerWatch.Elapsed);
             var solutionProperties = CreateSolutionProperties(workspacePath: workspacePath);
             LoadProject(
                 manager: manager,
@@ -97,10 +100,14 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
         var analyzer = manager.GetProject(projectFilePath: projectPath);
         ApplyGlobalProperties(analyzer: analyzer, properties: solutionProperties);
 
-        var environmentOptions = CreateEnvironmentOptions();
-        var results = string.IsNullOrWhiteSpace(value: requestedTargetFramework)
-            ? analyzer.Build(environmentOptions: environmentOptions)
-            : analyzer.Build(targetFramework: requestedTargetFramework, environmentOptions: environmentOptions);
+        var buildWatch = Stopwatch.StartNew();
+        var results = BuildWithRestoreFallback(
+            analyzer: analyzer,
+            requestedTargetFramework: requestedTargetFramework);
+        LoadProbe.ReportTiming(
+            stage: isRootProject ? "build(root)" : "build(nested)",
+            name: Path.GetFileNameWithoutExtension(path: projectPath),
+            elapsed: buildWatch.Elapsed);
         var result = SelectResult(results: results, requestedTargetFramework: requestedTargetFramework);
         if (result is null)
         {
@@ -364,6 +371,43 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
     private static bool IsSolutionFile(string path) =>
         path.EndsWith(value: ".sln", comparisonType: StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(value: ".slnx", comparisonType: StringComparison.OrdinalIgnoreCase);
+
+    // Buildalyzer runs every design-time build in a separate out-of-process MSBuild invocation
+    // (ProjectAnalyzer.BuildTargets -> ProcessRunner -> dotnet/MSBuild.exe). Because Typewriter
+    // fans several of those out concurrently, the default EnvironmentOptions.Restore == true is
+    // very costly: each process runs a NuGet restore, and NuGet takes cross-process locks on the
+    // global packages folder and on obj/project.assets.json. That serializes the fan-out and is
+    // the dominant cost in the msbuild-load phase.
+    //
+    // Restore is therefore skipped on the first attempt, and *any* failure is retried once with
+    // restore enabled. An earlier version gated the retry on obj/project.assets.json being absent,
+    // to avoid paying a second MSBuild round trip for a genuinely broken project. That gate was
+    // wrong: a stale assets file exists but no longer describes the project (package references
+    // edited, target frameworks changed, branch switched without building), so the restore-less
+    // build could fail -- or worse, succeed against an outdated package graph -- and the retry that
+    // would have corrected it was skipped. Correct metadata outranks the retry cost, which is paid
+    // only on the failure path and only once per project.
+    private static global::Buildalyzer.IAnalyzerResults BuildWithRestoreFallback(
+        global::Buildalyzer.IProjectAnalyzer analyzer,
+        string? requestedTargetFramework)
+    {
+        var results = Build(restore: false);
+        if (results.Count == 0 || !results.OverallSuccess)
+        {
+            results = Build(restore: true);
+        }
+
+        return results;
+
+        global::Buildalyzer.IAnalyzerResults Build(bool restore)
+        {
+            var environmentOptions = CreateEnvironmentOptions();
+            environmentOptions.Restore = restore;
+            return string.IsNullOrWhiteSpace(value: requestedTargetFramework)
+                ? analyzer.Build(environmentOptions: environmentOptions)
+                : analyzer.Build(targetFramework: requestedTargetFramework, environmentOptions: environmentOptions);
+        }
+    }
 
     private static global::Buildalyzer.Environment.EnvironmentOptions CreateEnvironmentOptions()
     {

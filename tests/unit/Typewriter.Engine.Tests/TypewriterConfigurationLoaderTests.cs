@@ -213,6 +213,97 @@ public sealed class TypewriterConfigurationLoaderTests
         }
     }
 
+    // Regression: GenerationConfigurationFile previously omitted RunSourceGenerators, so
+    // System.Text.Json silently discarded the value and the opt-out was a no-op. That defect
+    // also invalidated an end-to-end performance measurement, because both arms of the
+    // comparison ran generators. Assert the flag actually round-trips.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LoadAsyncBindsRunSourceGenerators(bool runSourceGenerators)
+    {
+        var root = CreateProjectDirectory();
+        try
+        {
+            await File.WriteAllTextAsync(
+                path: Path.Combine(path1: root, path2: "typewriter.json"),
+                contents: $$"""
+                          {
+                            "generation": {
+                              "runSourceGenerators": {{(runSourceGenerators ? "true" : "false")}}
+                            }
+                          }
+                          """);
+
+            var configuration = await TypewriterConfigurationLoader.LoadAsync(
+                workspacePath: root,
+                projectPath: null,
+                cancellationToken: CancellationToken.None);
+
+            configuration.Generation.RunSourceGenerators.Should().Be(runSourceGenerators);
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: root);
+        }
+    }
+
+    [Fact]
+    public async Task LoadAsyncDefaultsRunSourceGeneratorsToTrueWhenAbsent()
+    {
+        var root = CreateProjectDirectory();
+        try
+        {
+            await File.WriteAllTextAsync(
+                path: Path.Combine(path1: root, path2: "typewriter.json"),
+                contents: """
+                          {
+                            "generation": {
+                              "incremental": "off"
+                            }
+                          }
+                          """);
+
+            var configuration = await TypewriterConfigurationLoader.LoadAsync(
+                workspacePath: root,
+                projectPath: null,
+                cancellationToken: CancellationToken.None);
+
+            configuration.Generation.RunSourceGenerators.Should().BeTrue();
+            configuration.Generation.Incremental.Should().Be(GenerationConfiguration.IncrementalOff);
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: root);
+        }
+    }
+
+    private static async Task DeleteDirectoryWithRetryAsync(string directory)
+    {
+        const int MaxAttempts = 10;
+
+        for (var attempt = 1; attempt <= MaxAttempts; attempt++)
+        {
+            try
+            {
+                if (Directory.Exists(path: directory))
+                {
+                    Directory.Delete(path: directory, recursive: true);
+                }
+
+                return;
+            }
+            catch (IOException) when (attempt < MaxAttempts)
+            {
+                await Task.Delay(millisecondsDelay: 100).ConfigureAwait(continueOnCapturedContext: false);
+            }
+            catch (UnauthorizedAccessException) when (attempt < MaxAttempts)
+            {
+                await Task.Delay(millisecondsDelay: 100).ConfigureAwait(continueOnCapturedContext: false);
+            }
+        }
+    }
+
     private static string CreateProjectDirectory()
     {
         var directory = Path.Combine(

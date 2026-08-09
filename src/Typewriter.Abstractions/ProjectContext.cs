@@ -4,4 +4,5 @@ public sealed record ProjectContext(
     string ProjectPath,
     string WorkspacePath,
     string? TargetFramework = null,
-    bool RunFullDiagnostics = false);
+    bool RunFullDiagnostics = false,
+    bool RunSourceGenerators = true);

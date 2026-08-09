@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Typewriter.Abstractions;
 using Typewriter.Configuration;
 
@@ -10,6 +11,12 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
 {
     private const char IncludedProjectCacheKeySeparator = '\0';
     private const int MaxTemplateDocumentCacheEntries = 256;
+
+    private static readonly Regex IncludeProjectLiteralPattern = new(
+        pattern: """IncludeProject\s*\(\s*"(?<name>[^"]*)"\s*\)""",
+        options: RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture,
+        matchTimeout: TimeSpan.FromSeconds(value: 1));
+
     private static readonly ConcurrentDictionary<TemplateDocumentCacheKey, TemplateDocumentCacheEntry> TemplateDocumentCache = new();
     private static readonly ConcurrentQueue<TemplateDocumentCacheKey> TemplateDocumentCacheOrder = new();
     private readonly IGeneratedFileWriter _fileWriter;
@@ -223,6 +230,60 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
 
     private static bool RequiresIncludedProjectsInspection(TemplateDocument template) =>
         template.CodeBlocks.Any(predicate: block => block.Content.Contains(value: "IncludeProject", comparisonType: StringComparison.Ordinal));
+
+    /// <summary>
+    /// Creates the load request for one project.
+    /// </summary>
+    /// <remarks>
+    /// Every <see cref="ProjectContext" /> the generator builds goes through here on purpose. The
+    /// prefetch pass and the authoritative <c>GetMetadataAsync</c> call must produce identical
+    /// requests: the loader caches on the request's identity, so a context assembled slightly
+    /// differently in one place would warm an entry that the other never reads, silently costing a
+    /// duplicate MSBuild evaluation instead of saving one. A single construction point makes that
+    /// class of drift impossible rather than merely unlikely.
+    /// </remarks>
+    /// <param name="request">The generation request supplying the target framework and mode.</param>
+    /// <param name="workspace">The workspace the project belongs to.</param>
+    /// <param name="projectPath">The project to load.</param>
+    /// <returns>The load request.</returns>
+    private static ProjectContext CreateProjectContext(
+        GenerationRequest request,
+        WorkspaceContext workspace,
+        string projectPath) =>
+        new(
+            ProjectPath: projectPath,
+            WorkspacePath: workspace.RootPath,
+            TargetFramework: request.Configuration.DefaultTargetFramework,
+            RunFullDiagnostics: request.Mode == GenerationMode.Validate,
+            RunSourceGenerators: request.Configuration.Generation.RunSourceGenerators);
+
+    /// <summary>
+    /// Recovers the literal project names passed to <c>Settings.IncludeProject("...")</c>.
+    /// </summary>
+    /// <remarks>
+    /// Used only to widen the metadata prefetch, so it deliberately handles just the literal form.
+    /// A computed argument is simply not matched and falls back to loading during template
+    /// inspection, exactly as before.
+    /// </remarks>
+    /// <param name="template">The parsed template to scan.</param>
+    /// <returns>The literal project names, which may contain duplicates.</returns>
+    private static IReadOnlyList<string> ScanIncludedProjectNameLiterals(TemplateDocument template)
+    {
+        var names = new List<string>();
+        foreach (var block in template.CodeBlocks)
+        {
+            foreach (Match match in IncludeProjectLiteralPattern.Matches(input: block.Content))
+            {
+                var name = match.Groups[groupname: "name"].Value;
+                if (!string.IsNullOrWhiteSpace(value: name))
+                {
+                    names.Add(item: name);
+                }
+            }
+        }
+
+        return names;
+    }
 
     // A template that opts into PartialRenderingMode.Combined must be inspected so the setting is
     // known before render contexts are built. Templates that say nothing keep the Partial default,
@@ -639,12 +700,27 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
         }
 
         var metadataStopwatch = Stopwatch.StartNew();
+        var primaryContext = CreateProjectContext(
+            request: request,
+            workspace: workspace,
+            projectPath: projectPath);
+
+        // Included projects are normally discovered only after the primary project's metadata has
+        // been loaded and the template inspected, which forces their (expensive, out-of-process)
+        // MSBuild evaluation into a second wave that cannot overlap the first. The project names are
+        // string literals in the template text, so they can be recovered by a cheap scan beforehand
+        // and warmed together with the primary project. This is strictly a prefetch hint: template
+        // inspection below remains the authority on which projects are actually included, so a name
+        // the scan misses or over-approximates only affects timing, never the rendered output.
+        await PrefetchTemplateProjectsAsync(
+            request: request,
+            workspace: workspace,
+            templates: templates,
+            primaryContext: primaryContext,
+            cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
+
         var project = await _metadataProvider.GetMetadataAsync(
-            project: new ProjectContext(
-                ProjectPath: projectPath,
-                WorkspacePath: workspace.RootPath,
-                TargetFramework: request.Configuration.DefaultTargetFramework,
-                RunFullDiagnostics: request.Mode == GenerationMode.Validate),
+            project: primaryContext,
             cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
         performanceTrace.Add(stage: $"Metadata load ({Path.GetFileName(path: projectPath)})", elapsed: metadataStopwatch.Elapsed);
         foreach (var diagnostic in project.Diagnostics)
@@ -853,6 +929,49 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
         }
     }
 
+    private async Task PrefetchTemplateProjectsAsync(
+        GenerationRequest request,
+        WorkspaceContext workspace,
+        IEnumerable<TemplateFile> templates,
+        ProjectContext primaryContext,
+        CancellationToken cancellationToken)
+    {
+        var includedNames = new List<string>();
+        foreach (var templateFile in templates)
+        {
+            // Parsing is cheap next to an MSBuild evaluation and the parsed document is cached, so
+            // the main loop below re-parses without paying for it twice.
+            var scanDiagnostics = new List<GenerationDiagnostic>();
+            var template = ParseTemplate(templateFile: templateFile, diagnostics: scanDiagnostics);
+            includedNames.AddRange(collection: ScanIncludedProjectNameLiterals(template: template));
+        }
+
+        if (includedNames.Count == 0)
+        {
+            return;
+        }
+
+        // Unresolved names are intentionally ignored here: this pass exists only to warm the cache,
+        // and ResolveIncludedProjectsAsync still reports them as diagnostics against the template
+        // that actually referenced them.
+        var unresolvedNames = new List<string>();
+        var includedPaths = WorkspaceProjectResolver.ResolveProjectPathsByName(
+            workspacePath: workspace.RootPath,
+            projectNames: includedNames,
+            unresolvedNames: unresolvedNames);
+
+        var contexts = new List<ProjectContext> { primaryContext };
+        contexts.AddRange(
+            collection: includedPaths.Select(selector: includedPath => CreateProjectContext(
+                request: request,
+                workspace: workspace,
+                projectPath: includedPath)));
+
+        await _metadataProvider.PrefetchAsync(
+            projects: contexts,
+            cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
+    }
+
 #pragma warning disable S107
     private async Task<TemplateProjectContext> ResolveIncludedProjectsAsync(
         GenerationRequest request,
@@ -912,15 +1031,27 @@ public sealed class TypewriterGenerator : ITypewriterGenerator
         CancellationToken cancellationToken)
     {
         var includedMetadata = new List<ProjectMetadata>();
-        foreach (var includedProjectPath in includedProjectPaths)
+        var includedContexts = includedProjectPaths
+            .Select(selector: includedProjectPath => CreateProjectContext(
+                request: request,
+                workspace: workspace,
+                projectPath: includedProjectPath))
+            .ToArray();
+
+        // Each included project is an independent graph root, and metadata loading is dominated by
+        // out-of-process MSBuild latency. Requesting them one at a time in the loop below therefore
+        // serialised several narrow fan-outs that each left most cores idle. Announcing the whole set
+        // first lets the loader overlap them; the loop then reads from the warmed cache and keeps its
+        // existing ordering and error-handling semantics.
+        await _metadataProvider.PrefetchAsync(
+            projects: includedContexts,
+            cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
+
+        foreach (var includedContext in includedContexts)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var included = await _metadataProvider.GetMetadataAsync(
-                project: new ProjectContext(
-                    ProjectPath: includedProjectPath,
-                    WorkspacePath: workspace.RootPath,
-                    TargetFramework: request.Configuration.DefaultTargetFramework,
-                    RunFullDiagnostics: request.Mode == GenerationMode.Validate),
+                project: includedContext,
                 cancellationToken: cancellationToken).ConfigureAwait(continueOnCapturedContext: false);
             foreach (var diagnostic in included.Diagnostics)
             {

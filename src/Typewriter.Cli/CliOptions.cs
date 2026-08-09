@@ -13,7 +13,8 @@ internal sealed record CliOptions(
     bool AllProjects,
     bool Diff,
     bool Force,
-    bool Help)
+    bool Help,
+    bool NoSourceGenerators = false)
 {
     public IReadOnlyList<string> ChangedPaths { get; init; } = [];
 
@@ -30,5 +31,6 @@ internal sealed record CliOptions(
         AllProjects: false,
         Diff: false,
         Force: false,
-        Help: false);
+        Help: false,
+        NoSourceGenerators: false);
 }
