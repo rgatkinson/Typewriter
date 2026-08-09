@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Build.Framework;
 using Typewriter.Abstractions;
 
@@ -103,6 +104,7 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
         var buildWatch = Stopwatch.StartNew();
         var results = BuildWithRestoreFallback(
             analyzer: analyzer,
+            projectPath: projectPath,
             requestedTargetFramework: requestedTargetFramework);
         LoadProbe.ReportTiming(
             stage: isRootProject ? "build(root)" : "build(nested)",
@@ -389,11 +391,13 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
     // only on the failure path and only once per project.
     private static global::Buildalyzer.IAnalyzerResults BuildWithRestoreFallback(
         global::Buildalyzer.IProjectAnalyzer analyzer,
+        string projectPath,
         string? requestedTargetFramework)
     {
         var results = Build(restore: false);
         if (results.Count == 0 || !results.OverallSuccess)
         {
+            DeleteUnusableAssetsFile(projectPath: projectPath);
             results = Build(restore: true);
         }
 
@@ -408,6 +412,73 @@ public sealed class MsBuildProjectLoader : IProjectWorkspaceLoader
                 : analyzer.Build(targetFramework: requestedTargetFramework, environmentOptions: environmentOptions);
         }
     }
+
+    // NuGet's restore target reads the existing obj/project.assets.json before rewriting it, so a
+    // truncated or otherwise malformed lock file makes even a restoring build fail with "Error
+    // loading lock file" instead of repairing itself. Removing a file that cannot be parsed lets the
+    // retry restore from a clean slate. A well-formed but stale file is left alone -- restore handles
+    // that case correctly and can reuse its contents.
+    // SCS0018/SEC0116 are taint-tracking rules: they flag the file APIs below because assetsPath
+    // ultimately derives from the projectPath parameter. The taint is not real -- projectPath is the
+    // project file this loader was asked to build, the file name is the hard-coded literal
+    // "project.assets.json", and the guard below re-resolves the combined path and refuses to touch
+    // anything that does not sit directly inside the project's own obj directory. That check, not the
+    // pragma, is what makes the delete safe; the pragma only stops the analyzer complaining about a
+    // data flow it cannot follow.
+#pragma warning disable SCS0018 // Potential path traversal - path validated against the project's obj directory below
+#pragma warning disable SEC0116 // Path tampering - path validated against the project's obj directory below
+    private static void DeleteUnusableAssetsFile(string projectPath)
+    {
+        var projectDirectory = Path.GetDirectoryName(path: projectPath);
+        if (string.IsNullOrEmpty(value: projectDirectory))
+        {
+            return;
+        }
+
+        var objDirectory = Path.GetFullPath(path: Path.Combine(path1: projectDirectory, path2: "obj"));
+        var assetsPath = Path.GetFullPath(path: Path.Combine(path1: objDirectory, path2: "project.assets.json"));
+        if (!string.Equals(
+                a: Path.GetDirectoryName(path: assetsPath),
+                b: objDirectory.TrimEnd(trimChars: Path.DirectorySeparatorChar),
+                comparisonType: StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (!File.Exists(path: assetsPath))
+        {
+            return;
+        }
+
+        try
+        {
+            using var stream = File.OpenRead(path: assetsPath);
+            using var document = JsonDocument.Parse(utf8Json: stream);
+            return;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // The file cannot be inspected right now; leave it for the restore to deal with.
+            Debug.WriteLine(message: $"Unable to inspect '{assetsPath}': {exception.Message}");
+            return;
+        }
+        catch (JsonException exception)
+        {
+            Debug.WriteLine(message: $"Discarding unreadable '{assetsPath}': {exception.Message}");
+        }
+
+        try
+        {
+            File.Delete(path: assetsPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Best effort only: the restore surfaces a diagnostic if the file still blocks it.
+            Debug.WriteLine(message: $"Unable to delete '{assetsPath}': {exception.Message}");
+        }
+    }
+#pragma warning restore SEC0116
+#pragma warning restore SCS0018
 
     private static global::Buildalyzer.Environment.EnvironmentOptions CreateEnvironmentOptions()
     {

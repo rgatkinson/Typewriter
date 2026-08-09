@@ -483,6 +483,114 @@ public sealed class MsBuildProjectLoaderTests
         }
     }
 
+    [Fact]
+    public async Task LoadAsyncRestoresWhenRestoredAssetsFileIsDeleted()
+    {
+        // The loader first builds with restore disabled. That only works while obj/project.assets.json
+        // is present and current, so deleting it after a successful load must force the restore retry
+        // instead of failing the load.
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            await File.WriteAllTextAsync(
+                path: projectPath,
+                contents: """
+                          <Project Sdk="Microsoft.NET.Sdk">
+                            <PropertyGroup>
+                              <TargetFramework>net10.0</TargetFramework>
+                              <Nullable>enable</Nullable>
+                              <ImplicitUsings>enable</ImplicitUsings>
+                            </PropertyGroup>
+                          </Project>
+                          """);
+            await File.WriteAllTextAsync(path: Path.Combine(path1: directory, path2: "Model.cs"), contents: "namespace Sample; public sealed class Model { }");
+
+            var loader = new MsBuildProjectLoader();
+            var project = new ProjectContext(ProjectPath: projectPath, WorkspacePath: directory, TargetFramework: "net10.0");
+
+            var firstResult = await loader.LoadAsync(project: project, cancellationToken: CancellationToken.None);
+
+            firstResult.Diagnostics.Should().BeEmpty(because: FormatDiagnostics(diagnostics: firstResult.Diagnostics));
+
+            var assetsPath = Path.Combine(path1: directory, path2: "obj", path3: "project.assets.json");
+            File.Exists(path: assetsPath).Should().BeTrue(because: "the first load restores the project");
+
+            DeleteFile(path: assetsPath);
+            DeleteFile(path: Path.Combine(path1: directory, path2: "obj", path3: "project.nuget.cache"));
+
+            var secondResult = await loader.LoadAsync(project: project, cancellationToken: CancellationToken.None);
+
+            secondResult.Diagnostics.Should().BeEmpty(because: FormatDiagnostics(diagnostics: secondResult.Diagnostics));
+            secondResult.TargetFramework.Should().Be("net10.0");
+            secondResult.NullableEnabled.Should().BeTrue();
+            secondResult.ImplicitUsingsEnabled.Should().BeTrue();
+            secondResult.PreprocessorSymbols.Should().Contain("NET10_0");
+            secondResult.SourceFiles.Should().Contain(path => path.EndsWith(value: "Model.cs", comparisonType: StringComparison.OrdinalIgnoreCase));
+            File.Exists(path: assetsPath).Should().BeTrue(because: "the retry must restore the project again");
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    [Fact]
+    public async Task LoadAsyncRestoresWhenRestoredAssetsFileIsUnusable()
+    {
+        // A truncated or otherwise corrupt obj/project.assets.json is the common real-world form of a
+        // stale restore. The no-restore build must fail on it and the retry must repair the project.
+        var directory = CreateProjectDirectory();
+        try
+        {
+            var projectPath = Path.Combine(path1: directory, path2: "Sample.csproj");
+            await File.WriteAllTextAsync(
+                path: projectPath,
+                contents: """
+                          <Project Sdk="Microsoft.NET.Sdk">
+                            <PropertyGroup>
+                              <TargetFramework>net10.0</TargetFramework>
+                              <Nullable>enable</Nullable>
+                              <ImplicitUsings>enable</ImplicitUsings>
+                            </PropertyGroup>
+                          </Project>
+                          """);
+            await File.WriteAllTextAsync(path: Path.Combine(path1: directory, path2: "Model.cs"), contents: "namespace Sample; public sealed class Model { }");
+
+            var loader = new MsBuildProjectLoader();
+            var project = new ProjectContext(ProjectPath: projectPath, WorkspacePath: directory, TargetFramework: "net10.0");
+
+            var firstResult = await loader.LoadAsync(project: project, cancellationToken: CancellationToken.None);
+
+            firstResult.Diagnostics.Should().BeEmpty(because: FormatDiagnostics(diagnostics: firstResult.Diagnostics));
+
+            var assetsPath = Path.Combine(path1: directory, path2: "obj", path3: "project.assets.json");
+            File.Exists(path: assetsPath).Should().BeTrue(because: "the first load restores the project");
+
+            await File.WriteAllTextAsync(path: assetsPath, contents: "{ this is not a valid assets file");
+            DeleteFile(path: Path.Combine(path1: directory, path2: "obj", path3: "project.nuget.cache"));
+
+            var secondResult = await loader.LoadAsync(project: project, cancellationToken: CancellationToken.None);
+
+            secondResult.Diagnostics.Should().BeEmpty(because: FormatDiagnostics(diagnostics: secondResult.Diagnostics));
+            secondResult.TargetFramework.Should().Be("net10.0");
+            secondResult.NullableEnabled.Should().BeTrue();
+            secondResult.ImplicitUsingsEnabled.Should().BeTrue();
+            secondResult.PreprocessorSymbols.Should().Contain("NET10_0");
+            secondResult.SourceFiles.Should().Contain(path => path.EndsWith(value: "Model.cs", comparisonType: StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            await DeleteDirectoryWithRetryAsync(directory: directory);
+        }
+    }
+
+    // Every path passed here is built from the temp directory this fixture created, so the
+    // path-tampering analyzer has no untrusted input to flag.
+#pragma warning disable SEC0116
+    private static void DeleteFile(string path) => File.Delete(path: path);
+#pragma warning restore SEC0116
+
     private static string FormatDiagnostics(IEnumerable<GenerationDiagnostic> diagnostics) =>
         string.Join(
             separator: Environment.NewLine,
