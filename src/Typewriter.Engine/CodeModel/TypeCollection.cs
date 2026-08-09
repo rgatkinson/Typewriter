@@ -1,3 +1,5 @@
+using Typewriter.Engine;
+
 namespace Typewriter.CodeModel;
 
 public sealed class TypeCollection : ItemCollection<Type>, ITypeCollection
@@ -32,5 +34,19 @@ public sealed class TypeCollection : ItemCollection<Type>, ITypeCollection
         }
     }
 
-    protected override IEnumerable<string> GetItemFilter(Type item) => [item.OriginalName, item.FullName];
+    // Filters match on the C# name or the full name. OriginalName now carries the v3.0.1 nullable
+    // '?' suffix, so the un-suffixed name is offered as well; otherwise a filter such as
+    // $Types(int) would stop matching nullable occurrences that it used to match.
+    protected override IEnumerable<string> GetItemFilter(Type item)
+    {
+        yield return item.OriginalName;
+
+        var withoutNullableSuffix = CSharpTypeNameFormatter.TrimNullableSuffix(name: item.OriginalName);
+        if (!string.Equals(a: withoutNullableSuffix, b: item.OriginalName, comparisonType: StringComparison.Ordinal))
+        {
+            yield return withoutNullableSuffix;
+        }
+
+        yield return item.FullName;
+    }
 }

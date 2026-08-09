@@ -856,7 +856,7 @@ internal sealed class TemplateCodeModelAdapterFactory
             IsTask = type.IsTask || IsTaskLike(fullName: type.FullName),
             IsTimeSpan = TypeScriptTemporalTypes.IsDuration(fullName: type.FullName),
             IsValueTuple = type.IsValueTuple,
-            OriginalName = type.Name,
+            OriginalName = CSharpTypeNameFormatter.GetOriginalName(type: type),
             TupleElements = new Typewriter.CodeModel.FieldCollection(items: type.TupleElements.Select(selector: field => CreateField(field: field, parent: null))),
             TypeArguments = typeArguments,
             DefaultValue = GetDefaultValue(type: type, runtimeType: runtimeType),

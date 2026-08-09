@@ -1296,7 +1296,10 @@ public sealed class TemplateRendererTests
 
         diagnostics.Should().BeEmpty();
         output.Should().Contain("recipe-User|get|api/Users/items/${id}?search=${encodeURIComponent(search ?? '')}|User|Task");
-        output.Should().Contain("id:False:number:Int32, search:True:string:String");
+
+        // OriginalName follows the v3.0.1 C# contract: BCL primitives render as their C# keyword
+        // and nullable types keep their '?'. `search` is a nullable string, so it reads "string?".
+        output.Should().Contain("id:False:number:int, search:True:string:string?");
     }
 
     [Fact]
@@ -2297,7 +2300,7 @@ public sealed class TemplateRendererTests
             Diagnostics: []);
         const string template = """
             $Classes(c => c.Name.EndsWith("Dto") && c.Attributes.Any(a => a.Name == "GenerateFrontendType"))[
-            $Name:$Properties(p => !p.Type.IsNullable && p.Type.OriginalName == "String")[$Name;]]
+            $Name:$Properties(p => !p.Type.IsNullable && p.Type.OriginalName == "string")[$Name;]]
             """;
         var diagnostics = new List<GenerationDiagnostic>();
         var renderer = new TemplateRenderer(typeMapper: new TypeScriptTypeMapper());

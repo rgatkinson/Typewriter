@@ -177,7 +177,10 @@ public class Type : Item
 
     /// <summary>
     /// Gets the original C# name of the type before TypeScript mapping,
-    /// for example <c>Int32</c> when <see cref="Item.Name"/> renders <c>number</c>.
+    /// for example <c>int</c> when <see cref="Item.Name"/> renders <c>number</c>.
+    /// Well-known BCL types are rendered using their C# keyword or short name, and nullable types
+    /// carry a trailing <c>?</c> (<c>int?</c>, <c>FacilityId?</c>) so the value can be written
+    /// straight back into C# source. This matches Typewriter v3.0.1.
     /// Template shorthand: <c>$OriginalName</c>.
     /// </summary>
     public virtual string OriginalName { get; init; } = string.Empty;

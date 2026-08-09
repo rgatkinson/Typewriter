@@ -1372,7 +1372,12 @@ public sealed class TemplateRenderer
         {
             "Name" => type.Name,
             "name" => type.name,
-            "FullName" => type.FullName,
+
+            // v3.0.1 appended the nullable '?' to FullName as well as to OriginalName. The suffix
+            // is applied here, at the template read site, rather than on the underlying value:
+            // Type.FullName is the key used for metadata lookups and ordinal type comparisons
+            // across the engine, and suffixing it there would break all of them.
+            "FullName" => CSharpTypeNameFormatter.AppendNullableSuffix(name: type.FullName, isNullable: type.IsNullable),
             "AssemblyName" => type.AssemblyName,
             "Namespace" => type.Namespace,
             "OriginalName" => type.OriginalName,
@@ -3100,10 +3105,17 @@ public sealed class TemplateRenderer
                 guidType: guidType,
                 decimalType: decimalType,
                 runtimeType: runtimeType),
-            "FullName" => type.FullName,
+
+            // See the CodeModel-side "FullName" case: the v3.0.1 nullable suffix is applied at the
+            // template read site so the underlying lookup key stays un-suffixed.
+            "FullName" => CSharpTypeNameFormatter.AppendNullableSuffix(name: type.FullName, isNullable: type.IsNullable),
             "AssemblyName" => type.AssemblyName,
             "Namespace" => type.Namespace,
-            "OriginalName" => type.Name,
+
+            // Matches the CodeModel adapter: OriginalName is the C#-facing name and, as in
+            // v3.0.1, carries the nullable '?' suffix, additionally mapping BCL primitives to
+            // their C# keyword.
+            "OriginalName" => CSharpTypeNameFormatter.GetOriginalName(type: type),
             "Type" => new TypeTemplateValue(
                 Reference: type,
                 Text: _typeMapper.Map(

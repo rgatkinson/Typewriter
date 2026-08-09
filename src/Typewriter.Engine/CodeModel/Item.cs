@@ -16,6 +16,12 @@ public class Item
     /// Gets the fully qualified name of the item including its namespace,
     /// for example <c>MyApp.Models.UserModel</c>. Template shorthand: <c>$FullName</c>.
     /// </summary>
+    /// <remarks>
+    /// For a nullable type, <c>$FullName</c> renders with a trailing <c>?</c>
+    /// (<c>MyApp.Models.FacilityId?</c>), as it did in Typewriter v3.0.1. The suffix is added when
+    /// the template reads the value; this property itself holds the un-suffixed name, because it
+    /// is the key used for metadata lookups and ordinal type comparisons inside the engine.
+    /// </remarks>
     public virtual string FullName { get; init; } = string.Empty;
 
     /// <summary>
